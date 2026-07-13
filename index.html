@@ -271,6 +271,21 @@ async function loadAllQualifying(last) {
   return jsons.map(j => j.MRData.RaceTable.Races[0]?.QualifyingResults ?? []);
 }
 
+async function loadAllPitStops(last) {
+  const urls = [];
+  for (let r = 1; r <= last; r++) urls.push(`${API}/current/${r}/pitstops.json?limit=100`);
+  const jsons = await fetchAll(urls, "Fetching pit data");
+  return jsons.map(j => j.MRData.RaceTable.Races[0]?.PitStops ?? []);
+}
+
+function pitSecs(duration) {
+  if (duration.includes(":")) {
+    const [m, rest] = duration.split(":");
+    return parseInt(m, 10) * 60 + parseFloat(rest);
+  }
+  return parseFloat(duration);
+}
+
 // ---------- Analysis 1: uptrend detector ----------
 async function uptrend() {
   const last = await getLatestRound();
@@ -321,19 +336,51 @@ function fantasyPoints(finish, grid, status, fastestLap) {
 
 async function fantasyTop() {
   const last = await getLatestRound();
-  const drivers = new Map(), teams = new Map();
+  const { allResults, allSprints, allQuali } = await loadModelData(last);
+  const allPits = await loadAllPitStops(last);
 
-  for (const results of await loadAllResults(last)) {
-    for (const res of results) {
-      const pts = fantasyPoints(
-        parseInt(res.position, 10) || 25,
-        parseInt(res.grid, 10) || 25,
-        res.status,
-        res.FastestLap?.rank === "1"
-      );
-      const d = res.Driver.familyName, t = res.Constructor.name;
-      drivers.set(d, (drivers.get(d) ?? 0) + pts);
-      teams.set(t, (teams.get(t) ?? 0) + pts);
+  const drivers = new Map(), teams = new Map();
+  const add = (m, k, v) => m.set(k, (m.get(k) ?? 0) + v);
+
+  for (let r = 0; r < last; r++) {
+    const teamOf = new Map(); // driverId -> team, for pit stop bonuses
+
+    // race: base scoring + overtake bonus (≈ positions gained; on-track passes aren't in the data)
+    for (const res of allResults[r]) {
+      teamOf.set(res.Driver.driverId, res.Constructor.name);
+      const grid = parseInt(res.grid, 10) || 25, fin = parseInt(res.position, 10) || 25;
+      let pts = fantasyPoints(fin, grid, res.status, res.FastestLap?.rank === "1");
+      if (isFinished(res.status) && grid > fin) pts += grid - fin;
+      add(drivers, res.Driver.familyName, pts);
+      add(teams, res.Constructor.name, pts);
+    }
+
+    // qualifying: reached Q2 +1, reached Q3 +2
+    for (const q of allQuali[r]) {
+      const b = (q.Q2 ? 1 : 0) + (q.Q3 ? 2 : 0);
+      if (b) { add(drivers, q.Driver.familyName, b); add(teams, q.Constructor.name, b); }
+    }
+
+    // sprint: finish points + positions gained, DNF -20
+    for (const sr of allSprints[r]) {
+      const grid = parseInt(sr.grid, 10) || 25, fin = parseInt(sr.position, 10) || 25;
+      let pts = parseFloat(sr.points) || 0;
+      if (isFinished(sr.status)) pts += Math.max(0, grid - fin); else pts -= 20;
+      add(drivers, sr.Driver.familyName, pts);
+      add(teams, sr.Constructor.name, pts);
+    }
+
+    // fastest pit stop of the race: +10/+5/+3 to the three quickest teams (best stop per team)
+    const ranked = allPits[r]
+      .map(s => ({ team: teamOf.get(s.driverId), secs: pitSecs(s.duration) }))
+      .filter(x => x.team && x.secs <= 120)
+      .sort((a, b) => a.secs - b.secs);
+    const bonus = [10, 5, 3], seen = new Set();
+    for (const st of ranked) {
+      if (seen.has(st.team)) continue;
+      seen.add(st.team);
+      add(teams, st.team, bonus[seen.size - 1]);
+      if (seen.size === 3) break;
     }
   }
 
@@ -342,7 +389,8 @@ async function fantasyTop() {
   top(drivers).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
   title("Top 3 teams · fantasy pts");
   top(teams).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
-  note("Approximation — overtake, pit stop, sprint and Q3 bonuses not included.");
+  note("Includes overtake (≈ positions gained), Q2/Q3, sprint, and fastest-pit-stop (+10/+5/+3, teams only) "
+    + "bonuses. Driver-of-the-day and true on-track overtake counts aren't in the data.");
 }
 
 // ---------- Analysis 3: pit stops ----------
@@ -358,16 +406,9 @@ async function pitStops() {
       idTeam.set(res.Driver.driverId, res.Constructor.name);
     }
   }
-  const pitUrls = [];
-  for (let r = 1; r <= last; r++) pitUrls.push(`${API}/current/${r}/pitstops.json?limit=100`);
-  for (const json of await fetchAll(pitUrls, "Fetching pit data")) {
-    const stops = json.MRData.RaceTable.Races[0]?.PitStops ?? [];
+  for (const stops of await loadAllPitStops(last)) {
     for (const s of stops) {
-      let secs;
-      if (s.duration.includes(":")) {
-        const [m, rest] = s.duration.split(":");
-        secs = parseInt(m, 10) * 60 + parseFloat(rest);
-      } else secs = parseFloat(s.duration);
+      const secs = pitSecs(s.duration);
       if (secs > 120) { excluded++; continue; } // red-flag stoppages get logged as 15+ min "stops"
       total.set(s.driverId, (total.get(s.driverId) ?? 0) + secs);
       count.set(s.driverId, (count.get(s.driverId) ?? 0) + 1);
