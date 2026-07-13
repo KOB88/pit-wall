@@ -113,10 +113,11 @@
   details.row summary::-webkit-details-marker { display: none; }
   details.row summary::after { content: "▾"; color: var(--dim); font-size: 11px; align-self: center; }
   details.row[open] summary::after { content: "▴"; }
-  .rounds {
-    border-top: 1px solid var(--line); padding: 8px 12px 10px;
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 4px 10px;
-  }
+  .rounds-wrap { border-top: 1px solid var(--line); padding: 8px 12px 10px; }
+  .spark { width: 100%; height: 40px; display: block; margin-bottom: 6px; }
+  .spark polyline { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  .spark line.zero { stroke: var(--line); stroke-width: 1; }
+  .rounds { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 4px 10px; }
   .rounds span { font-size: 11px; color: var(--dim); }
   .rounds b { font-weight: 600; color: var(--text); margin-left: 5px; }
   .rounds b.neg { color: var(--down); }
@@ -146,15 +147,13 @@
 </header>
 
 <nav aria-label="Analyses">
-  <button onclick="run(uptrend, this)">Uptrend detector<small>Points momentum, last 4 rounds</small></button>
-  <button onclick="run(fantasyTop, this)">Fantasy top 3<small>Drivers &amp; teams, approx. scoring</small></button>
+  <button onclick="run(fantasyTop, this)">Fantasy top 3<small>Drivers &amp; teams, full scoring</small></button>
   <button onclick="run(pitStops, this)">Pit stop pace<small>Fastest avg, drivers &amp; teams</small></button>
   <button onclick="run(overtakes, this)">Overtake trend<small>Positions gained per round</small></button>
-  <button onclick="run(biggestChange, this)">Biggest movers<small>% change, round 1 vs latest</small></button>
-  <button onclick="run(formPredictor, this)">Form predictor<small>Pace, quali &amp; reliability model</small></button>
+  <button onclick="run(formPredictor, this)">Form predictor<small>Fantasy model &amp; momentum trends</small></button>
   <button onclick="run(raceForecast, this)">Race forecast<small>Next races · wet-weather risk</small></button>
-  <button onclick="run(backtest, this)">Backtest<small>Which method predicts best?</small></button>
-  <button onclick="run(teamOptimizer, this)">Team optimizer<small>Best 5+2 under budget</small></button>
+  <button onclick="run(backtest, this)">Backtest<small>Method shoot-out + auto-tune</small></button>
+  <button onclick="run(teamOptimizer, this)">Team optimizer<small>Best 5+2 &amp; captain pick</small></button>
 </nav>
 
 <div id="status" role="status"></div>
@@ -249,6 +248,16 @@ function note(t) {
 }
 function pct(v) { return (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
 
+function sparkline(vals) {
+  if (vals.length < 2) return "";
+  const w = 240, h = 40, min = Math.min(...vals, 0), max = Math.max(...vals, 1);
+  const x = i => 4 + (i / (vals.length - 1)) * (w - 8);
+  const y = v => h - 5 - ((v - min) / (max - min || 1)) * (h - 10);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`
+    + (min < 0 ? `<line class="zero" x1="0" x2="${w}" y1="${y(0)}" y2="${y(0)}"/>` : "")
+    + `<polyline points="${vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ")}"/></svg>`;
+}
+
 // ---------- shared data loaders ----------
 async function loadAllResults(last) {
   const urls = [];
@@ -286,41 +295,6 @@ function pitSecs(duration) {
   return parseFloat(duration);
 }
 
-// ---------- Analysis 1: uptrend detector ----------
-async function uptrend() {
-  const last = await getLatestRound();
-  const first = Math.max(1, last - 3);
-  const cumulative = new Map();
-
-  const urls = [];
-  for (let r = first; r <= last; r++) urls.push(`${API}/current/${r}/driverStandings.json`);
-  for (const json of await fetchAll(urls, "Fetching standings")) {
-    const standings = json.MRData.StandingsTable.StandingsLists[0]?.DriverStandings ?? [];
-    for (const s of standings) {
-      const name = s.Driver.familyName;
-      if (!cumulative.has(name)) cumulative.set(name, []);
-      cumulative.get(name).push(parseFloat(s.points));
-    }
-  }
-
-  const trending = [];
-  title("Trend check · last " + (last - first) + " gains");
-  for (const [name, totals] of cumulative) {
-    if (totals.length < 2) continue;
-    const gains = [];
-    for (let i = 1; i < totals.length; i++) gains.push(totals[i] - totals[i - 1]);
-    let increases = 0;
-    for (let i = 1; i < gains.length; i++) if (gains[i] > gains[i - 1]) increases++;
-    const up = gains.length >= 2 && increases >= gains.length - 2;
-    if (up) trending.push({ name, gains });
-    rowHTML("", name, up ? "UPTREND" : "—", up ? "up" : "", "gains: [" + gains.map(g => Math.round(g)).join(", ") + "]");
-  }
-
-  title("Trending up");
-  if (trending.length === 0) note("No clear uptrends in this window.");
-  trending.forEach((d, i) => rowHTML(i + 1, d.name, "▲", "up"));
-}
-
 // ---------- Analysis 2: fantasy top 3 ----------
 function fantasyPoints(finish, grid, status, fastestLap) {
   const racePts = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
@@ -338,39 +312,19 @@ async function fantasyTop() {
   const last = await getLatestRound();
   const { allResults, allSprints, allQuali } = await loadModelData(last);
   const allPits = await loadAllPitStops(last);
+  const drivers = buildDriverData(allResults, allSprints, allQuali, last);
 
-  const drivers = new Map(), teams = new Map();
-  const add = (m, k, v) => m.set(k, (m.get(k) ?? 0) + v);
+  const dTot = new Map(), tTot = new Map();
+  for (const [n, d] of drivers)
+    for (const rd of d.rounds) {
+      dTot.set(n, (dTot.get(n) ?? 0) + rd.fpts);
+      tTot.set(rd.rteam, (tTot.get(rd.rteam) ?? 0) + rd.fpts);
+    }
 
+  // fastest pit stop of each race: +10/+5/+3 to the three quickest teams (best stop per team)
   for (let r = 0; r < last; r++) {
-    const teamOf = new Map(); // driverId -> team, for pit stop bonuses
-
-    // race: base scoring + overtake bonus (≈ positions gained; on-track passes aren't in the data)
-    for (const res of allResults[r]) {
-      teamOf.set(res.Driver.driverId, res.Constructor.name);
-      const grid = parseInt(res.grid, 10) || 25, fin = parseInt(res.position, 10) || 25;
-      let pts = fantasyPoints(fin, grid, res.status, res.FastestLap?.rank === "1");
-      if (isFinished(res.status) && grid > fin) pts += grid - fin;
-      add(drivers, res.Driver.familyName, pts);
-      add(teams, res.Constructor.name, pts);
-    }
-
-    // qualifying: reached Q2 +1, reached Q3 +2
-    for (const q of allQuali[r]) {
-      const b = (q.Q2 ? 1 : 0) + (q.Q3 ? 2 : 0);
-      if (b) { add(drivers, q.Driver.familyName, b); add(teams, q.Constructor.name, b); }
-    }
-
-    // sprint: finish points + positions gained, DNF -20
-    for (const sr of allSprints[r]) {
-      const grid = parseInt(sr.grid, 10) || 25, fin = parseInt(sr.position, 10) || 25;
-      let pts = parseFloat(sr.points) || 0;
-      if (isFinished(sr.status)) pts += Math.max(0, grid - fin); else pts -= 20;
-      add(drivers, sr.Driver.familyName, pts);
-      add(teams, sr.Constructor.name, pts);
-    }
-
-    // fastest pit stop of the race: +10/+5/+3 to the three quickest teams (best stop per team)
+    const teamOf = new Map();
+    for (const res of allResults[r]) teamOf.set(res.Driver.driverId, res.Constructor.name);
     const ranked = allPits[r]
       .map(s => ({ team: teamOf.get(s.driverId), secs: pitSecs(s.duration) }))
       .filter(x => x.team && x.secs <= 120)
@@ -379,16 +333,16 @@ async function fantasyTop() {
     for (const st of ranked) {
       if (seen.has(st.team)) continue;
       seen.add(st.team);
-      add(teams, st.team, bonus[seen.size - 1]);
+      tTot.set(st.team, (tTot.get(st.team) ?? 0) + bonus[seen.size - 1]);
       if (seen.size === 3) break;
     }
   }
 
   const top = m => [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   title("Top 3 drivers · fantasy pts");
-  top(drivers).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
+  top(dTot).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
   title("Top 3 teams · fantasy pts");
-  top(teams).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
+  top(tTot).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
   note("Includes overtake (≈ positions gained), Q2/Q3, sprint, and fastest-pit-stop (+10/+5/+3, teams only) "
     + "bonuses. Driver-of-the-day and true on-track overtake counts aren't in the data.");
 }
@@ -460,82 +414,65 @@ async function overtakes() {
   note("Overtakes approximated as grid position minus finish position.");
 }
 
-// ---------- Analysis 5: biggest movers ----------
-async function biggestChange() {
-  const last = await getLatestRound();
-  const ptsPerRound = new Map();
-
-  for (const results of await loadAllResults(last)) {
-    for (const res of results) {
-      const n = res.Driver.familyName;
-      if (!ptsPerRound.has(n)) ptsPerRound.set(n, []);
-      ptsPerRound.get(n).push(parseFloat(res.points) || 0);
-    }
-  }
-
-  const changes = [], unmeasurable = [];
-  for (const [name, pts] of ptsPerRound) {
-    if (pts.length < 2) { unmeasurable.push(`${name} — raced fewer than 2 rounds`); continue; }
-    const f = pts[0], l = pts[pts.length - 1];
-    if (f === 0) { unmeasurable.push(`${name} — scored 0 in round 1 (latest: ${Math.round(l)} pts)`); continue; }
-    changes.push({ name, change: ((l - f) / f) * 100, f, l });
-  }
-  changes.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
-
-  title("Biggest movers · round 1 vs latest");
-  changes.slice(0, 10).forEach((c, i) =>
-    rowHTML(i + 1, c.name, pct(c.change), c.change >= 0 ? "up" : "down",
-      `R1: ${Math.round(c.f)} pts → latest: ${Math.round(c.l)} pts`));
-  if (unmeasurable.length) {
-    title("Not measurable as %");
-    unmeasurable.forEach(u => note(u));
-  }
+// ---------- prediction model (fantasy points) ----------
+const DEFAULT_TUNE = { decay: 0.85, shrinkK: 3, qualiPts: 0.8 };
+function tuneParams() {
+  try { return { ...DEFAULT_TUNE, ...JSON.parse(localStorage.getItem("pw-tune") ?? "{}") }; }
+  catch { return { ...DEFAULT_TUNE }; }
 }
-
-// ---------- prediction model ----------
-const DECAY = 0.85;            // per-round recency weight
-const SHRINK_K = 3;            // finished rounds needed before we mostly trust a driver's own numbers
-const QUALI_PTS_PER_POS = 0.8; // expected points per position of qualifying improvement
-const ROUND_PTS = 101;         // race points available per round (25+18+...+1)
 
 function isFinished(status) { return status === "Finished" || status.startsWith("+"); }
 
-// per-driver round history: race+sprint points, finish status, quali position
+// per-driver round history: championship pts, fantasy pts (race + overtake + quali + sprint), quali position
 function buildDriverData(allResults, allSprints, allQuali, upto) {
   const drivers = new Map();
   for (let r = 0; r < upto; r++) {
-    const sprintPts = new Map(), qualiPos = new Map();
-    for (const sr of allSprints[r]) sprintPts.set(sr.Driver.familyName, parseFloat(sr.points) || 0);
-    for (const q of allQuali[r]) qualiPos.set(q.Driver.familyName, parseInt(q.position, 10));
+    const sprintPts = new Map(), sprintF = new Map(), qualiPos = new Map(), qualiB = new Map();
+    for (const sr of allSprints[r]) {
+      const n = sr.Driver.familyName;
+      const g = parseInt(sr.grid, 10) || 25, f = parseInt(sr.position, 10) || 25;
+      sprintPts.set(n, parseFloat(sr.points) || 0);
+      sprintF.set(n, (parseFloat(sr.points) || 0) + (isFinished(sr.status) ? Math.max(0, g - f) : -20));
+    }
+    for (const q of allQuali[r]) {
+      qualiPos.set(q.Driver.familyName, parseInt(q.position, 10));
+      qualiB.set(q.Driver.familyName, (q.Q2 ? 1 : 0) + (q.Q3 ? 2 : 0));
+    }
     for (const res of allResults[r]) {
       const n = res.Driver.familyName;
       if (!drivers.has(n)) drivers.set(n, { rounds: [], team: "" });
       const d = drivers.get(n);
       d.team = res.Constructor.name;
+      const grid = parseInt(res.grid, 10) || 25, fin = parseInt(res.position, 10) || 25;
+      let f = fantasyPoints(fin, grid, res.status, res.FastestLap?.rank === "1");
+      if (isFinished(res.status) && grid > fin) f += grid - fin; // overtake bonus
       d.rounds.push({
         age: upto - 1 - r, // 0 = most recent round
         pts: (parseFloat(res.points) || 0) + (sprintPts.get(n) ?? 0),
+        fpts: f + (qualiB.get(n) ?? 0) + (sprintF.get(n) ?? 0),
         finished: isFinished(res.status),
         quali: qualiPos.get(n) ?? null,
+        rteam: res.Constructor.name,
       });
     }
   }
   return drivers;
 }
 
-function predictDrivers(drivers) {
+function predictDrivers(drivers, opts) {
+  const { decay, shrinkK, qualiPts } = { ...tuneParams(), ...opts };
   const preds = new Map();
   for (const [name, d] of drivers) {
-    // pace: recency-weighted points, DNF rounds excluded (a blown engine isn't slow pace)
+    // pace: recency-weighted fantasy points, DNF rounds excluded (a blown engine isn't slow pace)
     let wSum = 0, pSum = 0, fin = 0;
     for (const rd of d.rounds) if (rd.finished) {
-      const w = Math.pow(DECAY, rd.age);
-      wSum += w; pSum += w * rd.pts; fin++;
+      const w = Math.pow(decay, rd.age);
+      wSum += w; pSum += w * rd.fpts; fin++;
     }
     // quali trend: season average position minus recency-weighted position (+ = improving)
     let qw = 0, qs = 0, qn = 0, qTot = 0;
     for (const rd of d.rounds) if (rd.quali) {
-      const w = Math.pow(DECAY, rd.age);
+      const w = Math.pow(decay, rd.age);
       qw += w; qs += w * rd.quali; qn++; qTot += rd.quali;
     }
     preds.set(name, {
@@ -544,25 +481,24 @@ function predictDrivers(drivers) {
       fin, n: d.rounds.length, team: d.team,
     });
   }
-  // shrink low-sample drivers toward the field average, then apply reliability
+  // shrink low-sample drivers toward the field average, then price in DNF risk:
+  // expected fantasy = P(finish) x pace + P(DNF) x (-20). No zero-sum rescale — fantasy has no fixed pool.
   const vals = [...preds.values()];
   const fieldAvg = vals.reduce((a, p) => a + p.ewma, 0) / (vals.length || 1);
   for (const p of vals) {
-    const w = p.fin / (p.fin + SHRINK_K);
+    const w = p.fin / (p.fin + shrinkK);
     p.pace = w * p.ewma + (1 - w) * fieldAvg;
     p.reliability = p.n ? p.fin / p.n : 0;
-    p.pred = Math.max(0, (p.pace + QUALI_PTS_PER_POS * p.qualiTrend) * p.reliability);
+    p.pred = p.reliability * (p.pace + qualiPts * p.qualiTrend) + (1 - p.reliability) * -20;
+    p.norm = p.pred;
   }
-  // zero-sum: only ~101 points exist per round, so scale the field to fit
-  const sum = vals.reduce((a, p) => a + p.pred, 0);
-  for (const p of vals) p.norm = sum > 0 ? p.pred * (ROUND_PTS / sum) : 0;
   return preds;
 }
 
 function teammateDeltas(drivers) {
   const totals = new Map(), byTeam = new Map();
   for (const [name, d] of drivers) {
-    totals.set(name, d.rounds.reduce((a, rd) => a + rd.pts, 0));
+    totals.set(name, d.rounds.reduce((a, rd) => a + rd.fpts, 0));
     if (!byTeam.has(d.team)) byTeam.set(d.team, []);
     byTeam.get(d.team).push(name);
   }
@@ -623,8 +559,11 @@ async function loadTrackRecord(circuitId, season) {
         const n = res.Driver.familyName;
         if (!rec.has(n)) rec.set(n, { pSum: 0, wSum: 0, races: 0, wins: 0, podiums: 0 });
         const r = rec.get(n);
-        const pos = parseInt(res.position, 10);
-        r.pSum += w * (parseFloat(res.points) || 0);
+        const pos = parseInt(res.position, 10) || 25;
+        const grid = parseInt(res.grid, 10) || 25;
+        let f = fantasyPoints(pos, grid, res.status, res.FastestLap?.rank === "1");
+        if (isFinished(res.status) && grid > pos) f += grid - pos;
+        r.pSum += w * f; // fantasy pts, same currency as the model
         r.wSum += w;
         r.races++;
         if (pos === 1) r.wins++;
@@ -642,8 +581,8 @@ function wetSkillDeltas(drivers, wetRounds, upto) {
   for (const [name, d] of drivers) {
     let wSum = 0, wN = 0, dSum = 0, dN = 0;
     for (const rd of d.rounds) {
-      if (wetRounds.has(upto - rd.age)) { wSum += rd.pts; wN++; }
-      else { dSum += rd.pts; dN++; }
+      if (wetRounds.has(upto - rd.age)) { wSum += rd.fpts; wN++; }
+      else { dSum += rd.fpts; dN++; }
     }
     if (wN && dN) deltas.set(name, (wSum / wN - dSum / dN) * (wN / (wN + 2)));
   }
@@ -658,7 +597,7 @@ async function formPredictor() {
   const preds = predictDrivers(drivers);
   const deltas = teammateDeltas(drivers);
 
-  title("Predicted points · next round");
+  title("Predicted fantasy pts · next round");
   [...preds.entries()].sort((a, b) => b[1].norm - a[1].norm).slice(0, 10).forEach(([n, p], i) => {
     const dl = deltas.get(n) ?? 0;
     rowHTML(i + 1, n, p.norm.toFixed(1) + " pts", "",
@@ -679,36 +618,24 @@ async function formPredictor() {
   }
   byMomentum.sort((a, b) => b.avg - a.avg);
 
-  // per-round fantasy points (same approximate scoring as Fantasy top 3) for the dropdowns
-  const fantasyByRound = new Map();
-  allResults.forEach((results, r) => {
-    for (const res of results) {
-      const nm = res.Driver.familyName;
-      if (!fantasyByRound.has(nm)) fantasyByRound.set(nm, []);
-      fantasyByRound.get(nm).push({
-        r: r + 1,
-        pts: fantasyPoints(parseInt(res.position, 10) || 25, parseInt(res.grid, 10) || 25,
-          res.status, res.FastestLap?.rank === "1"),
-      });
-    }
-  });
-
   title("Momentum · avg % increase per round");
   byMomentum.slice(0, 10).forEach((d, i) => {
-    const rounds = fantasyByRound.get(d.name) ?? [];
+    const rounds = (drivers.get(d.name)?.rounds ?? []).map(rd => ({ r: last - rd.age, pts: Math.round(rd.fpts) }));
     const total = rounds.reduce((a, x) => a + x.pts, 0);
     out.insertAdjacentHTML("beforeend",
       `<details class="row"><summary><span class="pos">${i + 1}</span>`
       + `<span class="name">${d.name}<span class="detail">now: ${Math.round(d.now)} pts · fantasy total: ${total}</span></span>`
       + `<span class="val ${d.avg > 0 ? "up" : ""}">${pct(d.avg)}/rd</span></summary>`
+      + `<div class="rounds-wrap">${sparkline(rounds.map(x => x.pts))}`
       + `<div class="rounds">${rounds.map(x =>
-          `<span>R${x.r}<b class="${x.pts < 0 ? "neg" : ""}">${x.pts}</b></span>`).join("")}</div></details>`);
+          `<span>R${x.r}<b class="${x.pts < 0 ? "neg" : ""}">${x.pts}</b></span>`).join("")}</div></div></details>`);
   });
-  note("Tap a driver to see their fantasy points per round (approximate scoring — bonuses not included).");
+  note("Tap a driver for their fantasy points per round — sparkline and breakdown, quali and sprint bonuses included.");
   if (skipped.length) { title("Not enough data for % trend"); skipped.forEach(s => note(s)); }
 
-  note("Model: recency-weighted (λ=0.85) race+sprint points on finished rounds, shrunk toward the field average, "
-    + "adjusted by qualifying trend, scaled by finish rate, normalized to 101 pts across the field.");
+  const t = tuneParams();
+  note(`Model: recency-weighted (λ=${t.decay}) fantasy points on finished rounds, shrunk toward the field `
+    + `average (k=${t.shrinkK}), quali-trend adjusted (${t.qualiPts}/pos), with the -20 DNF risk priced in via finish rate.`);
 }
 
 // ---------- Analysis 7: race forecast ----------
@@ -756,8 +683,8 @@ async function raceForecast() {
     track = await loadTrackRecord(next.Circuit.circuitId, parseInt(sched.MRData.RaceTable.season, 10));
   } catch {}
 
-  const roundPts = next.Sprint ? ROUND_PTS + 36 : ROUND_PTS;
-  const fieldMean = roundPts / (preds.size || 1);
+  const vals = [...preds.values()];
+  const fieldMean = vals.reduce((a, p) => a + p.norm, 0) / (vals.length || 1);
   const rows = [];
   for (const [name, p] of preds) {
     let pts = p.norm;
@@ -770,14 +697,12 @@ async function raceForecast() {
     // driver-specific wet skill first, then residual compression: rain still hides car pace
     pts += rainProb * (wetSkill.get(name) ?? 0);
     const k = (wetSkill.size ? 0.3 : 0.5) * rainProb;
-    pts = Math.max(0, (1 - k) * pts + k * fieldMean);
+    pts = (1 - k) * pts + k * fieldMean;
     rows.push({ name, pts, tr, ws: wetSkill.get(name) });
   }
-  const sum = rows.reduce((a, r) => a + r.pts, 0);
-  rows.forEach(r => r.pts *= roundPts / sum);
   rows.sort((a, b) => b.pts - a.pts);
 
-  title(`Forecast · ${next.raceName} · ${next.date}${next.Sprint ? " · sprint weekend" : ""}`);
+  title(`Forecast · fantasy pts · ${next.raceName} · ${next.date}${next.Sprint ? " · sprint weekend" : ""}`);
   rows.slice(0, 10).forEach((r, i) =>
     rowHTML(i + 1, r.name, r.pts.toFixed(1) + " pts", "",
       (r.tr ? `here: ${r.tr.wins}W/${r.tr.podiums}P in ${r.tr.races}, avg ${Math.round(r.tr.avg)} pts · `
@@ -802,51 +727,86 @@ async function raceForecast() {
     + "weighted toward recent years and by how often they've raced the track. Weather forecasts only reach ~16 days out.");
 }
 
-// ---------- Analysis 8: walk-forward backtest ----------
+// ---------- Analysis 8: walk-forward backtest + auto-tune ----------
+// predict each round k from rounds 1..k-1 only, score in fantasy points
+function walkForward(allResults, allSprints, allQuali, last, opts) {
+  const full = buildDriverData(allResults, allSprints, allQuali, last);
+  const actualByRound = new Map();
+  for (const [nm, d] of full) {
+    const m = new Map();
+    for (const rd of d.rounds) m.set(last - rd.age, rd.fpts);
+    actualByRound.set(nm, m);
+  }
+  const err = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
+  const perRound = [];
+  let n = 0;
+  for (let k = 5; k <= last; k++) {
+    const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, k - 1), allResults[k - 2]);
+    const model = predictDrivers(drivers, opts);
+    const roundErr = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
+    let rn = 0;
+    for (const res of allResults[k - 1]) {
+      const nm = res.Driver.familyName;
+      const act = actualByRound.get(nm)?.get(k);
+      if (act == null) continue;
+      const d = drivers.get(nm);
+      const season = d ? d.rounds.reduce((a, rd) => a + rd.fpts, 0) / d.rounds.length : 0;
+      const recent = (d?.rounds ?? []).filter(rd => rd.age < 4);
+      const last4 = recent.length ? recent.reduce((a, rd) => a + rd.fpts, 0) / recent.length : 0;
+      roundErr["Season average"] += Math.abs(season - act);
+      roundErr["Last-4 average"] += Math.abs(last4 - act);
+      roundErr["Full model"] += Math.abs((model.get(nm)?.norm ?? 0) - act);
+      rn++; n++;
+    }
+    for (const m in err) err[m] += roundErr[m];
+    const w = Object.entries(roundErr).sort((a, b) => a[1] - b[1])[0];
+    perRound.push({ k, winner: w[0], mae: w[1] / (rn || 1) });
+  }
+  for (const m in err) err[m] /= n || 1;
+  return { err, perRound, n };
+}
+
 async function backtest() {
   const last = await getLatestRound();
   if (last < 5) { note("Need at least 5 completed rounds to backtest."); return; }
   const { allResults, allSprints, allQuali } = await loadModelData(last);
+  setStatus("Running walk-forward backtest…", true);
+  const { err, perRound, n } = walkForward(allResults, allSprints, allQuali, last);
 
-  const totalErr = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
-  const perRound = [];
-  let n = 0;
-
-  // predict each round k from rounds 1..k-1 only, score against what actually happened
-  for (let k = 5; k <= last; k++) {
-    setStatus(`Backtesting round ${k}…`, true);
-    const actual = new Map(), sp = new Map();
-    for (const sr of allSprints[k - 1]) sp.set(sr.Driver.familyName, parseFloat(sr.points) || 0);
-    for (const res of allResults[k - 1]) {
-      const nm = res.Driver.familyName;
-      actual.set(nm, (parseFloat(res.points) || 0) + (sp.get(nm) ?? 0));
-    }
-    const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, k - 1), allResults[k - 2]);
-    const model = predictDrivers(drivers);
-    const roundErr = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
-    for (const [nm, act] of actual) {
-      const d = drivers.get(nm);
-      const season = d ? d.rounds.reduce((a, rd) => a + rd.pts, 0) / d.rounds.length : 0;
-      const recent = (d?.rounds ?? []).filter(rd => rd.age < 4);
-      const last4 = recent.length ? recent.reduce((a, rd) => a + rd.pts, 0) / recent.length : 0;
-      roundErr["Season average"] += Math.abs(season - act);
-      roundErr["Last-4 average"] += Math.abs(last4 - act);
-      roundErr["Full model"] += Math.abs((model.get(nm)?.norm ?? 0) - act);
-      n++;
-    }
-    for (const m in roundErr) totalErr[m] += roundErr[m];
-    const winner = Object.entries(roundErr).sort((a, b) => a[1] - b[1])[0];
-    perRound.push({ k, winner: winner[0], mae: winner[1] / actual.size });
-  }
-
-  title(`Walk-forward backtest · rounds 5–${last}`);
-  Object.entries(totalErr).map(([l, e]) => [l, e / n]).sort((a, b) => a[1] - b[1])
+  title(`Walk-forward backtest · rounds 5–${last} · fantasy pts`);
+  Object.entries(err).sort((a, b) => a[1] - b[1])
     .forEach(([label, mae], i) => rowHTML(i + 1, label, mae.toFixed(2) + " MAE", i === 0 ? "up" : ""));
 
   title("Best method per round");
   perRound.forEach(r => rowHTML("R" + r.k, r.winner, r.mae.toFixed(2) + " MAE"));
-  note(`Each round predicted using only the rounds before it — ${n} driver-round predictions scored across `
-    + `${perRound.length} rounds. MAE = mean absolute points error per driver (lower is better).`);
+  const t = tuneParams();
+  note(`${n} driver-round predictions, each made using only the rounds before it. MAE = mean absolute fantasy-point `
+    + `error per driver (lower is better). Current model constants: λ=${t.decay}, shrink k=${t.shrinkK}, quali ${t.qualiPts}/pos.`);
+  out.insertAdjacentHTML("beforeend",
+    `<button class="optimize" onclick="tuneModel()">Auto-tune model constants</button><div id="tuneOut"></div>`);
+}
+
+async function tuneModel() {
+  const tuneOut = document.getElementById("tuneOut");
+  tuneOut.innerHTML = `<p class="note">Searching 45 combinations…</p>`;
+  const last = await getLatestRound();
+  const { allResults, allSprints, allQuali } = await loadModelData(last);
+  const results = [];
+  for (const decay of [0.7, 0.8, 0.85, 0.9, 1])
+    for (const shrinkK of [1, 3, 5])
+      for (const qualiPts of [0, 0.8, 1.6]) {
+        const { err } = walkForward(allResults, allSprints, allQuali, last, { decay, shrinkK, qualiPts });
+        results.push({ decay, shrinkK, qualiPts, mae: err["Full model"] });
+      }
+  results.sort((a, b) => a.mae - b.mae);
+  const best = results[0];
+  localStorage.setItem("pw-tune", JSON.stringify({ decay: best.decay, shrinkK: best.shrinkK, qualiPts: best.qualiPts }));
+  tuneOut.innerHTML = `<div class="section-title">Tuned · best of ${results.length} combos</div>`
+    + results.slice(0, 5).map((r, i) =>
+      `<div class="row"><span class="pos">${i + 1}</span><span class="name">λ=${r.decay} · k=${r.shrinkK} · quali ${r.qualiPts}</span>`
+      + `<span class="val ${i === 0 ? "up" : ""}">${r.mae.toFixed(2)} MAE</span></div>`).join("")
+    + `<p class="note">Best combo saved — the Form predictor, Race forecast and Team optimizer now use it. `
+    + `Tuned on only ${last - 4} test rounds, so expect modest gains; re-tune after each race.</p>`;
 }
 
 // ---------- Analysis 9: team optimizer ----------
@@ -910,18 +870,21 @@ function optimizeTeam() {
     const dPrice = five.reduce((a, x) => a + x.price, 0);
     if (dPrice > budget) return;
     const dPts = five.reduce((a, x) => a + x.pts, 0);
+    const cap = five.reduce((a, x) => (x.pts > a.pts ? x : a), five[0]); // DRS boost doubles the best pick
     for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
       const price = dPrice + cs[i].price + cs[j].price;
       if (price > budget) continue;
-      const pts = dPts + cs[i].pts + cs[j].pts;
-      if (!best || pts > best.pts) best = { five: [...five], pair: [cs[i], cs[j]], price, pts };
+      const pts = dPts + cap.pts + cs[i].pts + cs[j].pts;
+      if (!best || pts > best.pts) best = { five: [...five], cap, pair: [cs[i], cs[j]], price, pts };
     }
   });
   if (!best) { optOut.innerHTML = `<p class="err">No combination fits the $${budget}M budget.</p>`; return; }
   optOut.innerHTML =
     `<div class="section-title">Best team · ${best.pts.toFixed(1)} pred pts · $${best.price.toFixed(1)}M</div>`
-    + best.five.map(x => `<div class="row"><span class="name">${x.name}</span>`
-      + `<span class="val">$${x.price.toFixed(1)}M · ${x.pts.toFixed(1)} pts</span></div>`).join("")
+    + best.five.map(x => `<div class="row"><span class="name">${x.name}`
+      + `${x === best.cap ? `<span class="detail">DRS boost — counts double</span>` : ""}</span>`
+      + `<span class="val${x === best.cap ? " up" : ""}">$${x.price.toFixed(1)}M · `
+      + `${(x === best.cap ? 2 * x.pts : x.pts).toFixed(1)} pts</span></div>`).join("")
     + best.pair.map(x => `<div class="row"><span class="name">${x.name}<span class="detail">constructor</span></span>`
       + `<span class="val">$${x.price.toFixed(1)}M · ${x.pts.toFixed(1)} pts</span></div>`).join("");
 }
