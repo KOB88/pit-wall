@@ -857,17 +857,29 @@ async function teamOptimizer() {
   const teamPred = new Map();
   for (const p of preds.values()) teamPred.set(p.team, (teamPred.get(p.team) ?? 0) + p.norm);
 
+  // no public price API — prefill with estimates scaled from predicted points ($4.5M-$30M, the game's range)
+  const scale = vals => {
+    const min = Math.min(...vals), max = Math.max(...vals);
+    return v => 4.5 + ((v - min) / ((max - min) || 1)) * 25.5;
+  };
+  const dEst = scale([...preds.values()].map(p => p.norm));
+  const tEst = scale([...teamPred.values()]);
+
   title("Team optimizer · driver prices ($M)");
-  note("Enter current prices from the official F1 Fantasy game — they're saved on this device. Leave blank to exclude.");
-  const priceInput = (kind, name, pts) =>
-    `<div class="row"><span class="name">${kind === "d" ? dn(name) : name}<span class="detail">predicted ${pts.toFixed(1)} pts</span></span>`
-    + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" type="number" `
-    + `min="0" step="0.1" placeholder="$M" value="${localStorage.getItem(priceKey(kind, name)) ?? ""}"></div>`;
+  note("Prefilled with estimates scaled from predicted points — overwrite with the real prices from the official "
+    + "F1 Fantasy game when you have them. Edits are saved on this device.");
+  const priceInput = (kind, name, pts, est) => {
+    const stored = localStorage.getItem(priceKey(kind, name));
+    return `<div class="row"><span class="name">${kind === "d" ? dn(name) : name}`
+      + `<span class="detail">predicted ${pts.toFixed(1)} pts${stored == null ? " · price estimated" : ""}</span></span>`
+      + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" type="number" `
+      + `min="0" step="0.1" placeholder="$M" value="${stored ?? est.toFixed(1)}"></div>`;
+  };
   [...preds.keys()].sort((a, b) => preds.get(b).norm - preds.get(a).norm)
-    .forEach(nm => out.insertAdjacentHTML("beforeend", priceInput("d", nm, preds.get(nm).norm)));
+    .forEach(nm => out.insertAdjacentHTML("beforeend", priceInput("d", nm, preds.get(nm).norm, dEst(preds.get(nm).norm))));
   title("Constructor prices ($M)");
   [...teamPred.keys()].sort((a, b) => teamPred.get(b) - teamPred.get(a))
-    .forEach(t => out.insertAdjacentHTML("beforeend", priceInput("c", t, teamPred.get(t))));
+    .forEach(t => out.insertAdjacentHTML("beforeend", priceInput("c", t, teamPred.get(t), tEst(teamPred.get(t)))));
   out.insertAdjacentHTML("beforeend",
     `<div class="row"><span class="name">Budget ($M)</span>`
     + `<input id="budget" type="number" min="0" step="0.5" value="${localStorage.getItem("pw-budget") ?? 100}"></div>`
