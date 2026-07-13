@@ -448,7 +448,9 @@ async function overtakes() {
 }
 
 // ---------- prediction model (fantasy points) ----------
-const DEFAULT_TUNE = { decay: 0.85, shrinkK: 3, qualiPts: 0.8 };
+// qualiPts = fantasy pts per 1% gap-to-pole improvement; mechW = how fully a mechanical
+// DNF counts against future reliability (1 = same as a crash, 0.5 = "the team will fix it")
+const DEFAULT_TUNE = { decay: 0.85, shrinkK: 3, qualiPts: 2, mechW: 1 };
 function tuneParams() {
   try { return { ...DEFAULT_TUNE, ...JSON.parse(localStorage.getItem("pw-tune") ?? "{}") }; }
   catch { return { ...DEFAULT_TUNE }; }
@@ -456,11 +458,22 @@ function tuneParams() {
 
 function isFinished(status) { return status === "Finished" || status.startsWith("+"); }
 
-// per-driver round history: championship pts, fantasy pts (race + overtake + quali + sprint), quali position
+// crashes follow the driver; everything else (engine, gearbox, hydraulics…) follows the car
+const CRASH_STATUS = new Set(["Accident", "Collision", "Spun off", "Collision damage"]);
+
+function qTime(t) { // "1:29.708" or "89.708" -> seconds
+  if (!t) return null;
+  const p = t.split(":");
+  const s = p.length === 2 ? parseInt(p[0], 10) * 60 + parseFloat(p[1]) : parseFloat(p[0]);
+  return isNaN(s) ? null : s;
+}
+
+// per-driver round history: championship pts, fantasy pts (race + overtake + quali + sprint),
+// quali gap-to-pole %, and whether a DNF was the driver's own doing
 function buildDriverData(allResults, allSprints, allQuali, upto) {
   const drivers = new Map();
   for (let r = 0; r < upto; r++) {
-    const sprintPts = new Map(), sprintF = new Map(), qualiPos = new Map(), qualiB = new Map();
+    const sprintPts = new Map(), sprintF = new Map(), qualiB = new Map(), qBest = new Map();
     for (const sr of allSprints[r]) {
       const n = sr.Driver.familyName;
       const g = parseInt(sr.grid, 10) || 25, f = parseInt(sr.position, 10) || 25;
@@ -468,9 +481,14 @@ function buildDriverData(allResults, allSprints, allQuali, upto) {
       sprintF.set(n, (parseFloat(sr.points) || 0) + (isFinished(sr.status) ? Math.max(0, g - f) : -20));
     }
     for (const q of allQuali[r]) {
-      qualiPos.set(q.Driver.familyName, parseInt(q.position, 10));
       qualiB.set(q.Driver.familyName, (q.Q2 ? 1 : 0) + (q.Q3 ? 2 : 0));
+      const best = Math.min(...[q.Q1, q.Q2, q.Q3].map(qTime).filter(t => t != null));
+      if (isFinite(best)) qBest.set(q.Driver.familyName, best);
     }
+    // gap to pole in % — a far finer pace signal than grid position
+    const pole = Math.min(...qBest.values());
+    const qualiGap = new Map();
+    if (isFinite(pole)) for (const [n, t] of qBest) qualiGap.set(n, ((t - pole) / pole) * 100);
     for (const res of allResults[r]) {
       const n = res.Driver.familyName;
       noteFlag(res.Driver);
@@ -485,7 +503,8 @@ function buildDriverData(allResults, allSprints, allQuali, upto) {
         pts: (parseFloat(res.points) || 0) + (sprintPts.get(n) ?? 0),
         fpts: f + (qualiB.get(n) ?? 0) + (sprintF.get(n) ?? 0),
         finished: isFinished(res.status),
-        quali: qualiPos.get(n) ?? null,
+        crash: !isFinished(res.status) && CRASH_STATUS.has(res.status),
+        qgap: qualiGap.get(n) ?? null,
         rteam: res.Constructor.name,
       });
     }
@@ -494,35 +513,43 @@ function buildDriverData(allResults, allSprints, allQuali, upto) {
 }
 
 function predictDrivers(drivers, opts) {
-  const { decay, shrinkK, qualiPts } = { ...tuneParams(), ...opts };
+  const { decay, shrinkK, qualiPts, mechW } = { ...tuneParams(), ...opts };
   const preds = new Map();
   for (const [name, d] of drivers) {
     // pace: recency-weighted fantasy points, DNF rounds excluded (a blown engine isn't slow pace)
-    let wSum = 0, pSum = 0, fin = 0;
-    for (const rd of d.rounds) if (rd.finished) {
-      const w = Math.pow(decay, rd.age);
-      wSum += w; pSum += w * rd.fpts; fin++;
+    let wSum = 0, pSum = 0, fin = 0, crash = 0, mech = 0;
+    for (const rd of d.rounds) {
+      if (rd.finished) {
+        const w = Math.pow(decay, rd.age);
+        wSum += w; pSum += w * rd.fpts; fin++;
+      } else rd.crash ? crash++ : mech++;
     }
-    // quali trend: season average position minus recency-weighted position (+ = improving)
+    // quali trend in % gap-to-pole: season average minus recency-weighted (+ = getting faster)
     let qw = 0, qs = 0, qn = 0, qTot = 0;
-    for (const rd of d.rounds) if (rd.quali) {
+    for (const rd of d.rounds) if (rd.qgap != null) {
       const w = Math.pow(decay, rd.age);
-      qw += w; qs += w * rd.quali; qn++; qTot += rd.quali;
+      qw += w; qs += w * rd.qgap; qn++; qTot += rd.qgap;
     }
+    // floor/ceiling: average of the 3 worst and 3 best fantasy rounds
+    const sorted = d.rounds.map(rd => rd.fpts).sort((a, b) => a - b);
+    const k = Math.min(3, sorted.length);
+    const floor = sorted.slice(0, k).reduce((a, b) => a + b, 0) / k;
+    const ceil = sorted.slice(-k).reduce((a, b) => a + b, 0) / k;
     preds.set(name, {
       ewma: wSum > 0 ? pSum / wSum : 0,
       qualiTrend: qn >= 2 ? qTot / qn - qs / qw : 0,
-      fin, n: d.rounds.length, team: d.team,
+      fin, crash, mech, floor, ceil, n: d.rounds.length, team: d.team,
     });
   }
   // shrink low-sample drivers toward the field average, then price in DNF risk:
-  // expected fantasy = P(finish) x pace + P(DNF) x (-20). No zero-sum rescale — fantasy has no fixed pool.
+  // expected fantasy = P(finish) x pace + P(DNF) x (-20). Crashes always count fully against
+  // the driver; how much a mechanical DNF predicts future ones is tuned (mechW).
   const vals = [...preds.values()];
   const fieldAvg = vals.reduce((a, p) => a + p.ewma, 0) / (vals.length || 1);
   for (const p of vals) {
     const w = p.fin / (p.fin + shrinkK);
     p.pace = w * p.ewma + (1 - w) * fieldAvg;
-    p.reliability = p.n ? p.fin / p.n : 0;
+    p.reliability = p.n ? Math.max(0, 1 - (p.crash + mechW * p.mech) / p.n) : 0;
     p.pred = p.reliability * (p.pace + qualiPts * p.qualiTrend) + (1 - p.reliability) * -20;
     p.norm = p.pred;
   }
@@ -636,8 +663,10 @@ async function formPredictor() {
   [...preds.entries()].sort((a, b) => b[1].norm - a[1].norm).slice(0, 10).forEach(([n, p], i) => {
     const dl = deltas.get(n) ?? 0;
     rowHTML(i + 1, dn(n), p.norm.toFixed(1) + " pts", "",
-      `pace ${p.pace.toFixed(1)} · quali trend ${p.qualiTrend >= 0 ? "+" : ""}${p.qualiTrend.toFixed(1)} pos`
-      + ` · finishes ${Math.round(p.reliability * 100)}% · vs teammate ${dl >= 0 ? "+" : ""}${Math.round(dl)} pts`);
+      `pace ${p.pace.toFixed(1)} · quali trend ${p.qualiTrend >= 0 ? "+" : ""}${p.qualiTrend.toFixed(2)}%`
+      + ` · reliability ${Math.round(p.reliability * 100)}%`
+      + (p.crash || p.mech ? ` (${p.crash} crash / ${p.mech} mech)` : "")
+      + ` · range ${Math.round(p.floor)}…${Math.round(p.ceil)} · vs teammate ${dl >= 0 ? "+" : ""}${Math.round(dl)} pts`);
   });
 
   // momentum: avg % increase relative to the driver's own points base
@@ -670,7 +699,9 @@ async function formPredictor() {
 
   const t = tuneParams();
   note(`Model: recency-weighted (λ=${t.decay}) fantasy points on finished rounds, shrunk toward the field `
-    + `average (k=${t.shrinkK}), quali-trend adjusted (${t.qualiPts}/pos), with the -20 DNF risk priced in via finish rate.`);
+    + `average (k=${t.shrinkK}), adjusted by quali gap-to-pole trend (${t.qualiPts} pts per 1% gained). `
+    + `DNF risk prices in the -20: crashes count fully against the driver, mechanical failures at `
+    + `weight ${t.mechW} (tuned). Range = average of each driver's 3 worst / 3 best rounds.`);
 }
 
 // ---------- Analysis 7: race forecast ----------
@@ -816,7 +847,8 @@ async function backtest() {
   perRound.forEach(r => rowHTML("R" + r.k, r.winner, r.mae.toFixed(2) + " MAE"));
   const t = tuneParams();
   note(`${n} driver-round predictions, each made using only the rounds before it. MAE = mean absolute fantasy-point `
-    + `error per driver (lower is better). Current model constants: λ=${t.decay}, shrink k=${t.shrinkK}, quali ${t.qualiPts}/pos.`);
+    + `error per driver (lower is better). Current model constants: λ=${t.decay}, shrink k=${t.shrinkK}, `
+    + `quali ${t.qualiPts}/% gap, mech DNF weight ${t.mechW}.`);
   out.insertAdjacentHTML("beforeend",
     `<button class="optimize" onclick="tuneModel()">Auto-tune model constants</button><div id="tuneOut"></div>`);
 }
@@ -829,16 +861,19 @@ async function tuneModel() {
   const results = [];
   for (const decay of [0.7, 0.8, 0.85, 0.9, 1])
     for (const shrinkK of [1, 3, 5])
-      for (const qualiPts of [0, 0.8, 1.6]) {
-        const { err } = walkForward(allResults, allSprints, allQuali, last, { decay, shrinkK, qualiPts });
-        results.push({ decay, shrinkK, qualiPts, mae: err["Full model"] });
-      }
+      for (const qualiPts of [0, 2, 4])
+        for (const mechW of [0.5, 0.75, 1]) {
+          const { err } = walkForward(allResults, allSprints, allQuali, last, { decay, shrinkK, qualiPts, mechW });
+          results.push({ decay, shrinkK, qualiPts, mechW, mae: err["Full model"] });
+        }
   results.sort((a, b) => a.mae - b.mae);
   const best = results[0];
-  localStorage.setItem("pw-tune", JSON.stringify({ decay: best.decay, shrinkK: best.shrinkK, qualiPts: best.qualiPts }));
+  localStorage.setItem("pw-tune", JSON.stringify({
+    decay: best.decay, shrinkK: best.shrinkK, qualiPts: best.qualiPts, mechW: best.mechW,
+  }));
   tuneOut.innerHTML = `<div class="section-title">Tuned · best of ${results.length} combos</div>`
     + results.slice(0, 5).map((r, i) =>
-      `<div class="row"><span class="pos">${i + 1}</span><span class="name">λ=${r.decay} · k=${r.shrinkK} · quali ${r.qualiPts}</span>`
+      `<div class="row"><span class="pos">${i + 1}</span><span class="name">λ=${r.decay} · k=${r.shrinkK} · quali ${r.qualiPts} · mech ${r.mechW}</span>`
       + `<span class="val ${i === 0 ? "up" : ""}">${r.mae.toFixed(2)} MAE</span></div>`).join("")
     + `<p class="note">Best combo saved — the Form predictor, Race forecast and Team optimizer now use it. `
     + `Tuned on only ${last - 4} test rounds, so expect modest gains; re-tune after each race.</p>`;
@@ -868,15 +903,16 @@ async function teamOptimizer() {
   title("Team optimizer · driver prices ($M)");
   note("Prefilled with estimates scaled from predicted points — overwrite with the real prices from the official "
     + "F1 Fantasy game when you have them. Edits are saved on this device.");
-  const priceInput = (kind, name, pts, est) => {
+  const priceInput = (kind, name, pts, est, ceil = 0) => {
     const stored = localStorage.getItem(priceKey(kind, name));
     return `<div class="row"><span class="name">${kind === "d" ? dn(name) : name}`
       + `<span class="detail">predicted ${pts.toFixed(1)} pts${stored == null ? " · price estimated" : ""}</span></span>`
-      + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" type="number" `
+      + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" data-ceil="${ceil.toFixed(1)}" type="number" `
       + `min="0" step="0.1" placeholder="$M" value="${stored ?? est.toFixed(1)}"></div>`;
   };
   [...preds.keys()].sort((a, b) => preds.get(b).norm - preds.get(a).norm)
-    .forEach(nm => out.insertAdjacentHTML("beforeend", priceInput("d", nm, preds.get(nm).norm, dEst(preds.get(nm).norm))));
+    .forEach(nm => out.insertAdjacentHTML("beforeend",
+      priceInput("d", nm, preds.get(nm).norm, dEst(preds.get(nm).norm), preds.get(nm).ceil)));
   title("Constructor prices ($M)");
   [...teamPred.keys()].sort((a, b) => teamPred.get(b) - teamPred.get(a))
     .forEach(t => out.insertAdjacentHTML("beforeend", priceInput("c", t, teamPred.get(t), tEst(teamPred.get(t)))));
@@ -902,7 +938,10 @@ function optimizeTeam() {
     else localStorage.removeItem(priceKey(inp.dataset.kind, inp.dataset.name));
     const price = parseFloat(inp.value);
     if (!(price > 0)) return;
-    (inp.dataset.kind === "d" ? ds : cs).push({ name: inp.dataset.name, price, pts: parseFloat(inp.dataset.pts) });
+    (inp.dataset.kind === "d" ? ds : cs).push({
+      name: inp.dataset.name, price,
+      pts: parseFloat(inp.dataset.pts), ceil: parseFloat(inp.dataset.ceil) || 0,
+    });
   });
   const budget = parseFloat(document.getElementById("budget").value) || 100;
   localStorage.setItem("pw-budget", budget);
@@ -934,6 +973,12 @@ function optimizeTeam() {
       + `${(x === best.cap ? 2 * x.pts : x.pts).toFixed(1)} pts</span></div>`).join("")
     + best.pair.map(x => `<div class="row"><span class="name">${x.name}<span class="detail">constructor</span></span>`
       + `<span class="val">$${x.price.toFixed(1)}M · ${x.pts.toFixed(1)} pts</span></div>`).join("");
+  // expectation says boost the highest mean — but if you're chasing a lead, boost the highest ceiling
+  const hc = best.five.reduce((a, x) => (x.ceil > a.ceil ? x : a), best.five[0]);
+  if (hc.name !== best.cap.name)
+    optOut.insertAdjacentHTML("beforeend",
+      `<p class="note">Chasing your league? ${dn(hc.name)} is the higher-ceiling boost: his best rounds average `
+      + `${hc.ceil.toFixed(1)} pts vs ${best.cap.name}'s ${best.cap.ceil.toFixed(1)} — riskier, bigger jackpot.</p>`);
 }
 
 // offline shell: no-op when sw.js isn't present (e.g. opening the file directly)
