@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Pit Wall — F1 Fantasy Analyzer</title>
+<meta name="theme-color" content="#101216">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75,500..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #101216;
+    --panel: #181b21;
+    --panel-2: #1f232b;
+    --line: #2a2f39;
+    --text: #e8eaee;
+    --dim: #8b919d;
+    --accent: #ffd24a;      /* timing-screen yellow */
+    --up: #4ade80;
+    --down: #f0716a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: env(safe-area-inset-top) 14px calc(env(safe-area-inset-bottom) + 24px);
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  header { padding: 22px 2px 16px; border-bottom: 1px solid var(--line); }
+  h1 {
+    font-family: 'Archivo', sans-serif;
+    font-stretch: 75%;
+    font-weight: 800;
+    font-size: 26px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 12px; margin-top: 4px; }
+
+  nav { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 16px 0; }
+  nav button {
+    font-family: 'Archivo', sans-serif;
+    font-stretch: 75%;
+    font-weight: 600;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    text-align: left;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line);
+    border-radius: 6px;
+    padding: 12px 12px;
+    cursor: pointer;
+    min-height: 58px;
+    transition: border-color 0.15s;
+  }
+  nav button small { display: block; color: var(--dim); font-weight: 500; font-size: 11px; text-transform: none; letter-spacing: 0; margin-top: 2px; }
+  nav button:active, nav button.active { border-left-color: var(--accent); background: var(--panel-2); }
+  nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #status { color: var(--dim); font-size: 12px; min-height: 18px; padding: 2px; }
+  #status .blink { color: var(--accent); }
+
+  #out { margin-top: 8px; }
+  .section-title {
+    font-family: 'Archivo', sans-serif;
+    font-stretch: 75%;
+    font-weight: 700;
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    margin: 20px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--line);
+  }
+  .row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 9px 12px;
+    margin-bottom: 6px;
+  }
+  .row .pos { color: var(--accent); font-weight: 600; min-width: 2ch; }
+  .row .name { flex: 1; }
+  .row .val { font-weight: 600; }
+  .row .detail { display: block; color: var(--dim); font-size: 11px; }
+  .val.up { color: var(--up); }
+  .val.down { color: var(--down); }
+  .note { color: var(--dim); font-size: 12px; margin: 10px 2px; }
+  .err { color: var(--down); font-size: 13px; margin: 12px 2px; }
+  details.row { display: block; padding: 0; }
+  details.row summary {
+    display: flex; align-items: baseline; gap: 10px; padding: 9px 12px;
+    cursor: pointer; list-style: none;
+  }
+  details.row summary::-webkit-details-marker { display: none; }
+  details.row summary::after { content: "▾"; color: var(--dim); font-size: 11px; align-self: center; }
+  details.row[open] summary::after { content: "▴"; }
+  .rounds {
+    border-top: 1px solid var(--line); padding: 8px 12px 10px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 4px 10px;
+  }
+  .rounds span { font-size: 11px; color: var(--dim); }
+  .rounds b { font-weight: 600; color: var(--text); margin-left: 5px; }
+  .rounds b.neg { color: var(--down); }
+  .row input {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    font: inherit; width: 84px; padding: 4px 8px; border-radius: 4px; text-align: right;
+  }
+  .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.optimize {
+    font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; cursor: pointer;
+    background: var(--accent); border: none; color: #14161a;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .blink { animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: 0.35; } }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Pit <span>Wall</span></h1>
+  <div class="sub">Live season analysis · data: jolpi.ca (Ergast-compatible)</div>
+</header>
+
+<nav aria-label="Analyses">
+  <button onclick="run(uptrend, this)">Uptrend detector<small>Points momentum, last 4 rounds</small></button>
+  <button onclick="run(fantasyTop, this)">Fantasy top 3<small>Drivers &amp; teams, approx. scoring</small></button>
+  <button onclick="run(pitStops, this)">Pit stop pace<small>Fastest avg, drivers &amp; teams</small></button>
+  <button onclick="run(overtakes, this)">Overtake trend<small>Positions gained per round</small></button>
+  <button onclick="run(biggestChange, this)">Biggest movers<small>% change, round 1 vs latest</small></button>
+  <button onclick="run(formPredictor, this)">Form predictor<small>Pace, quali &amp; reliability model</small></button>
+  <button onclick="run(raceForecast, this)">Race forecast<small>Next races · wet-weather risk</small></button>
+  <button onclick="run(backtest, this)">Backtest<small>Which method predicts best?</small></button>
+  <button onclick="run(teamOptimizer, this)">Team optimizer<small>Best 5+2 under budget</small></button>
+</nav>
+
+<div id="status" role="status"></div>
+<div id="out"></div>
+
+<script>
+const API = "https://api.jolpi.ca/ergast/f1";
+const cache = new Map();
+let latestRound = null;
+
+const out = document.getElementById("out");
+const statusEl = document.getElementById("status");
+
+function setStatus(msg, busy) {
+  statusEl.innerHTML = busy ? `<span class="blink">●</span> ${msg}` : msg;
+}
+
+const CACHE_VER = "pw1:";
+function cacheTTL(url) {
+  if (url.includes("open-meteo")) return 60 * 60e3; // weather forecasts go stale fast
+  // the no-round standings call tells us the latest round — keep it fresh;
+  // everything else is historical race data that never changes
+  return url.endsWith("/current/driverStandings.json") ? 15 * 60e3 : 24 * 3600e3;
+}
+
+async function fetchCached(url, emptyOn404) {
+  if (cache.has(url)) return cache.get(url);
+  try {
+    const hit = JSON.parse(localStorage.getItem(CACHE_VER + url));
+    if (hit && Date.now() - hit.t < cacheTTL(url)) { cache.set(url, hit.d); return hit.d; }
+  } catch {}
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(url);
+    if (res.status !== 429 || attempt >= 3) break;
+    await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // rate-limited — back off
+  }
+  // OpenF1 says 404 for "query matched nothing" — callers can opt into treating that as empty
+  const json = emptyOn404 && res.status === 404 ? [] : null;
+  if (json === null && !res.ok) throw new Error("API returned " + res.status);
+  const data = json ?? await res.json();
+  cache.set(url, data);
+  try { localStorage.setItem(CACHE_VER + url, JSON.stringify({ t: Date.now(), d: data })); } catch {}
+  return data;
+}
+
+// fetch a batch of URLs, 3 in flight at a time (jolpi.ca allows ~4 req/s)
+async function fetchAll(urls, label, emptyOn404) {
+  const results = new Array(urls.length);
+  let next = 0, done = 0;
+  async function worker() {
+    while (next < urls.length) {
+      const i = next++;
+      results[i] = await fetchCached(urls[i], emptyOn404);
+      setStatus(`${label} ${++done} of ${urls.length}…`, true);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, urls.length) }, worker));
+  return results;
+}
+
+async function getLatestRound() {
+  if (latestRound) return latestRound;
+  const json = await fetchCached(`${API}/current/driverStandings.json`);
+  latestRound = parseInt(json.MRData.StandingsTable.round, 10);
+  return latestRound;
+}
+
+async function run(analysis, btn) {
+  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  out.innerHTML = "";
+  try {
+    await analysis();
+    setStatus("Done. Data cached — repeat runs are instant.", false);
+  } catch (e) {
+    setStatus("", false);
+    out.innerHTML = `<p class="err">Something went wrong: ${e.message}. Check your connection and try again.</p>`;
+  }
+}
+
+// ---------- rendering helpers ----------
+function title(t) {
+  out.insertAdjacentHTML("beforeend", `<div class="section-title">${t}</div>`);
+}
+function rowHTML(pos, name, val, valClass = "", detail = "") {
+  out.insertAdjacentHTML("beforeend",
+    `<div class="row"><span class="pos">${pos}</span><span class="name">${name}${detail ? `<span class="detail">${detail}</span>` : ""}</span><span class="val ${valClass}">${val}</span></div>`);
+}
+function note(t) {
+  out.insertAdjacentHTML("beforeend", `<p class="note">${t}</p>`);
+}
+function pct(v) { return (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
+
+// ---------- shared data loaders ----------
+async function loadAllResults(last) {
+  const urls = [];
+  for (let r = 1; r <= last; r++) urls.push(`${API}/current/${r}/results.json?limit=40`);
+  const jsons = await fetchAll(urls, "Fetching results");
+  return jsons.map(j => j.MRData.RaceTable.Races[0]?.Results ?? []);
+}
+
+async function loadAllSprints(last) {
+  const urls = [];
+  for (let r = 1; r <= last; r++) urls.push(`${API}/current/${r}/sprint.json?limit=40`);
+  const jsons = await fetchAll(urls, "Fetching sprints");
+  return jsons.map(j => j.MRData.RaceTable.Races[0]?.SprintResults ?? []);
+}
+
+async function loadAllQualifying(last) {
+  const urls = [];
+  for (let r = 1; r <= last; r++) urls.push(`${API}/current/${r}/qualifying.json?limit=40`);
+  const jsons = await fetchAll(urls, "Fetching qualifying");
+  return jsons.map(j => j.MRData.RaceTable.Races[0]?.QualifyingResults ?? []);
+}
+
+// ---------- Analysis 1: uptrend detector ----------
+async function uptrend() {
+  const last = await getLatestRound();
+  const first = Math.max(1, last - 3);
+  const cumulative = new Map();
+
+  const urls = [];
+  for (let r = first; r <= last; r++) urls.push(`${API}/current/${r}/driverStandings.json`);
+  for (const json of await fetchAll(urls, "Fetching standings")) {
+    const standings = json.MRData.StandingsTable.StandingsLists[0]?.DriverStandings ?? [];
+    for (const s of standings) {
+      const name = s.Driver.familyName;
+      if (!cumulative.has(name)) cumulative.set(name, []);
+      cumulative.get(name).push(parseFloat(s.points));
+    }
+  }
+
+  const trending = [];
+  title("Trend check · last " + (last - first) + " gains");
+  for (const [name, totals] of cumulative) {
+    if (totals.length < 2) continue;
+    const gains = [];
+    for (let i = 1; i < totals.length; i++) gains.push(totals[i] - totals[i - 1]);
+    let increases = 0;
+    for (let i = 1; i < gains.length; i++) if (gains[i] > gains[i - 1]) increases++;
+    const up = gains.length >= 2 && increases >= gains.length - 2;
+    if (up) trending.push({ name, gains });
+    rowHTML("", name, up ? "UPTREND" : "—", up ? "up" : "", "gains: [" + gains.map(g => Math.round(g)).join(", ") + "]");
+  }
+
+  title("Trending up");
+  if (trending.length === 0) note("No clear uptrends in this window.");
+  trending.forEach((d, i) => rowHTML(i + 1, d.name, "▲", "up"));
+}
+
+// ---------- Analysis 2: fantasy top 3 ----------
+function fantasyPoints(finish, grid, status, fastestLap) {
+  const racePts = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
+  const finished = status === "Finished" || status.startsWith("+");
+  if (!finished) return -20;
+  let total = 0;
+  if (finish >= 1 && finish <= 10) total += racePts[finish - 1];
+  if (grid >= 1 && grid <= 10) total += 11 - grid;
+  total += grid - finish;
+  if (fastestLap) total += 10;
+  return total;
+}
+
+async function fantasyTop() {
+  const last = await getLatestRound();
+  const drivers = new Map(), teams = new Map();
+
+  for (const results of await loadAllResults(last)) {
+    for (const res of results) {
+      const pts = fantasyPoints(
+        parseInt(res.position, 10) || 25,
+        parseInt(res.grid, 10) || 25,
+        res.status,
+        res.FastestLap?.rank === "1"
+      );
+      const d = res.Driver.familyName, t = res.Constructor.name;
+      drivers.set(d, (drivers.get(d) ?? 0) + pts);
+      teams.set(t, (teams.get(t) ?? 0) + pts);
+    }
+  }
+
+  const top = m => [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+  title("Top 3 drivers · fantasy pts");
+  top(drivers).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
+  title("Top 3 teams · fantasy pts");
+  top(teams).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
+  note("Approximation — overtake, pit stop, sprint and Q3 bonuses not included.");
+}
+
+// ---------- Analysis 3: pit stops ----------
+async function pitStops() {
+  const last = await getLatestRound();
+  const idName = new Map(), idTeam = new Map();
+  const total = new Map(), count = new Map();
+  let excluded = 0;
+
+  for (const results of await loadAllResults(last)) {
+    for (const res of results) {
+      idName.set(res.Driver.driverId, res.Driver.familyName);
+      idTeam.set(res.Driver.driverId, res.Constructor.name);
+    }
+  }
+  const pitUrls = [];
+  for (let r = 1; r <= last; r++) pitUrls.push(`${API}/current/${r}/pitstops.json?limit=100`);
+  for (const json of await fetchAll(pitUrls, "Fetching pit data")) {
+    const stops = json.MRData.RaceTable.Races[0]?.PitStops ?? [];
+    for (const s of stops) {
+      let secs;
+      if (s.duration.includes(":")) {
+        const [m, rest] = s.duration.split(":");
+        secs = parseInt(m, 10) * 60 + parseFloat(rest);
+      } else secs = parseFloat(s.duration);
+      if (secs > 120) { excluded++; continue; } // red-flag stoppages get logged as 15+ min "stops"
+      total.set(s.driverId, (total.get(s.driverId) ?? 0) + secs);
+      count.set(s.driverId, (count.get(s.driverId) ?? 0) + 1);
+    }
+  }
+
+  const driverAvg = new Map(), teamTotal = new Map(), teamCount = new Map();
+  for (const id of total.keys()) {
+    driverAvg.set(idName.get(id) ?? id, total.get(id) / count.get(id));
+    const t = idTeam.get(id) ?? "Unknown";
+    teamTotal.set(t, (teamTotal.get(t) ?? 0) + total.get(id));
+    teamCount.set(t, (teamCount.get(t) ?? 0) + count.get(id));
+  }
+  const teamAvg = new Map();
+  for (const t of teamTotal.keys()) teamAvg.set(t, teamTotal.get(t) / teamCount.get(t));
+
+  const fastest = m => [...m.entries()].sort((a, b) => a[1] - b[1]).slice(0, 5);
+  title("Fastest avg pit stop · drivers");
+  fastest(driverAvg).forEach(([n, v], i) => rowHTML(i + 1, n, v.toFixed(3) + "s"));
+  title("Fastest avg pit stop · teams");
+  fastest(teamAvg).forEach(([n, v], i) => rowHTML(i + 1, n, v.toFixed(3) + "s"));
+  note("Durations are total pit lane time, not stationary time."
+    + (excluded ? ` Excluded ${excluded} stops over 120s (red-flag stoppages).` : ""));
+}
+
+// ---------- Analysis 4: overtake trend ----------
+async function overtakes() {
+  const last = await getLatestRound();
+  const perRound = [];
+
+  for (const results of await loadAllResults(last)) {
+    let sum = 0;
+    for (const res of results) {
+      const grid = parseInt(res.grid, 10) || 25;
+      const finish = parseInt(res.position, 10) || 25;
+      if (grid > finish) sum += grid - finish;
+    }
+    perRound.push(sum);
+  }
+
+  title("Positions gained per round");
+  perRound.forEach((v, i) => rowHTML("R" + (i + 1), "", v));
+  const first = perRound[0], lastV = perRound[perRound.length - 1];
+  if (first > 0) {
+    const change = ((lastV - first) / first) * 100;
+    title("Round 1 → latest");
+    rowHTML("", "Change in positions gained", pct(change), change >= 0 ? "up" : "down");
+  }
+  note("Overtakes approximated as grid position minus finish position.");
+}
+
+// ---------- Analysis 5: biggest movers ----------
+async function biggestChange() {
+  const last = await getLatestRound();
+  const ptsPerRound = new Map();
+
+  for (const results of await loadAllResults(last)) {
+    for (const res of results) {
+      const n = res.Driver.familyName;
+      if (!ptsPerRound.has(n)) ptsPerRound.set(n, []);
+      ptsPerRound.get(n).push(parseFloat(res.points) || 0);
+    }
+  }
+
+  const changes = [], unmeasurable = [];
+  for (const [name, pts] of ptsPerRound) {
+    if (pts.length < 2) { unmeasurable.push(`${name} — raced fewer than 2 rounds`); continue; }
+    const f = pts[0], l = pts[pts.length - 1];
+    if (f === 0) { unmeasurable.push(`${name} — scored 0 in round 1 (latest: ${Math.round(l)} pts)`); continue; }
+    changes.push({ name, change: ((l - f) / f) * 100, f, l });
+  }
+  changes.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+
+  title("Biggest movers · round 1 vs latest");
+  changes.slice(0, 10).forEach((c, i) =>
+    rowHTML(i + 1, c.name, pct(c.change), c.change >= 0 ? "up" : "down",
+      `R1: ${Math.round(c.f)} pts → latest: ${Math.round(c.l)} pts`));
+  if (unmeasurable.length) {
+    title("Not measurable as %");
+    unmeasurable.forEach(u => note(u));
+  }
+}
+
+// ---------- prediction model ----------
+const DECAY = 0.85;            // per-round recency weight
+const SHRINK_K = 3;            // finished rounds needed before we mostly trust a driver's own numbers
+const QUALI_PTS_PER_POS = 0.8; // expected points per position of qualifying improvement
+const ROUND_PTS = 101;         // race points available per round (25+18+...+1)
+
+function isFinished(status) { return status === "Finished" || status.startsWith("+"); }
+
+// per-driver round history: race+sprint points, finish status, quali position
+function buildDriverData(allResults, allSprints, allQuali, upto) {
+  const drivers = new Map();
+  for (let r = 0; r < upto; r++) {
+    const sprintPts = new Map(), qualiPos = new Map();
+    for (const sr of allSprints[r]) sprintPts.set(sr.Driver.familyName, parseFloat(sr.points) || 0);
+    for (const q of allQuali[r]) qualiPos.set(q.Driver.familyName, parseInt(q.position, 10));
+    for (const res of allResults[r]) {
+      const n = res.Driver.familyName;
+      if (!drivers.has(n)) drivers.set(n, { rounds: [], team: "" });
+      const d = drivers.get(n);
+      d.team = res.Constructor.name;
+      d.rounds.push({
+        age: upto - 1 - r, // 0 = most recent round
+        pts: (parseFloat(res.points) || 0) + (sprintPts.get(n) ?? 0),
+        finished: isFinished(res.status),
+        quali: qualiPos.get(n) ?? null,
+      });
+    }
+  }
+  return drivers;
+}
+
+function predictDrivers(drivers) {
+  const preds = new Map();
+  for (const [name, d] of drivers) {
+    // pace: recency-weighted points, DNF rounds excluded (a blown engine isn't slow pace)
+    let wSum = 0, pSum = 0, fin = 0;
+    for (const rd of d.rounds) if (rd.finished) {
+      const w = Math.pow(DECAY, rd.age);
+      wSum += w; pSum += w * rd.pts; fin++;
+    }
+    // quali trend: season average position minus recency-weighted position (+ = improving)
+    let qw = 0, qs = 0, qn = 0, qTot = 0;
+    for (const rd of d.rounds) if (rd.quali) {
+      const w = Math.pow(DECAY, rd.age);
+      qw += w; qs += w * rd.quali; qn++; qTot += rd.quali;
+    }
+    preds.set(name, {
+      ewma: wSum > 0 ? pSum / wSum : 0,
+      qualiTrend: qn >= 2 ? qTot / qn - qs / qw : 0,
+      fin, n: d.rounds.length, team: d.team,
+    });
+  }
+  // shrink low-sample drivers toward the field average, then apply reliability
+  const vals = [...preds.values()];
+  const fieldAvg = vals.reduce((a, p) => a + p.ewma, 0) / (vals.length || 1);
+  for (const p of vals) {
+    const w = p.fin / (p.fin + SHRINK_K);
+    p.pace = w * p.ewma + (1 - w) * fieldAvg;
+    p.reliability = p.n ? p.fin / p.n : 0;
+    p.pred = Math.max(0, (p.pace + QUALI_PTS_PER_POS * p.qualiTrend) * p.reliability);
+  }
+  // zero-sum: only ~101 points exist per round, so scale the field to fit
+  const sum = vals.reduce((a, p) => a + p.pred, 0);
+  for (const p of vals) p.norm = sum > 0 ? p.pred * (ROUND_PTS / sum) : 0;
+  return preds;
+}
+
+function teammateDeltas(drivers) {
+  const totals = new Map(), byTeam = new Map();
+  for (const [name, d] of drivers) {
+    totals.set(name, d.rounds.reduce((a, rd) => a + rd.pts, 0));
+    if (!byTeam.has(d.team)) byTeam.set(d.team, []);
+    byTeam.get(d.team).push(name);
+  }
+  const deltas = new Map();
+  for (const names of byTeam.values())
+    for (const n of names) {
+      const others = names.filter(x => x !== n);
+      if (others.length) deltas.set(n, totals.get(n) - Math.max(...others.map(o => totals.get(o))));
+    }
+  return deltas;
+}
+
+async function loadModelData(last) {
+  const allResults = await loadAllResults(last);
+  const allSprints = await loadAllSprints(last);
+  const allQuali = await loadAllQualifying(last);
+  return { allResults, allSprints, allQuali };
+}
+
+// keep only drivers who raced the most recent round — no predictions for departed drivers
+function activeOnly(drivers, latestResults) {
+  const active = new Set(latestResults.map(res => res.Driver.familyName));
+  for (const name of [...drivers.keys()]) if (!active.has(name)) drivers.delete(name);
+  return drivers;
+}
+
+const OPENF1 = "https://api.openf1.org/v1";
+
+// which completed rounds were wet? (OpenF1 rainfall flag; race sessions in date order = round order)
+async function loadWetRounds(last) {
+  const wet = new Set();
+  try {
+    const sched = await fetchCached(`${API}/current.json?limit=30`);
+    const sessions = [...await fetchCached(`${OPENF1}/sessions?year=${sched.MRData.RaceTable.season}&session_name=Race`)]
+      .sort((a, b) => a.date_start.localeCompare(b.date_start));
+    const urls = sessions.slice(0, last).map(s => `${OPENF1}/weather?session_key=${s.session_key}&rainfall=1`);
+    const rains = await fetchAll(urls, "Checking historic rain", true); // 404 = dry race
+    rains.forEach((rows, i) => { if (Array.isArray(rows) && rows.length) wet.add(i + 1); });
+  } catch {} // OpenF1 down or no data yet — forecast falls back to field compression
+  return wet;
+}
+
+const HISTORY_YEARS = 5;   // seasons of track history to load
+const YEAR_DECAY = 0.8;    // last year's race counts more than five years ago
+const TRACK_WEIGHT = 0.25; // max share of the prediction that track record can claim
+
+// a driver's record at one circuit over the past seasons: wins, podiums, weighted avg points
+async function loadTrackRecord(circuitId, season) {
+  const urls = [];
+  for (let y = season - HISTORY_YEARS; y < season; y++)
+    urls.push(`${API}/${y}/circuits/${circuitId}/results.json?limit=60`);
+  const jsons = await fetchAll(urls, "Fetching track history");
+  const rec = new Map();
+  jsons.forEach((j, i) => {
+    const w = Math.pow(YEAR_DECAY, HISTORY_YEARS - 1 - i); // i=0 is the oldest season
+    for (const race of j.MRData.RaceTable.Races ?? [])
+      for (const res of race.Results ?? []) {
+        const n = res.Driver.familyName;
+        if (!rec.has(n)) rec.set(n, { pSum: 0, wSum: 0, races: 0, wins: 0, podiums: 0 });
+        const r = rec.get(n);
+        const pos = parseInt(res.position, 10);
+        r.pSum += w * (parseFloat(res.points) || 0);
+        r.wSum += w;
+        r.races++;
+        if (pos === 1) r.wins++;
+        if (pos <= 3) r.podiums++;
+      }
+  });
+  for (const r of rec.values()) r.avg = r.wSum ? r.pSum / r.wSum : 0;
+  return rec;
+}
+
+// wet skill: a driver's wet-vs-dry points-per-round delta, shrunk by wet sample size
+function wetSkillDeltas(drivers, wetRounds, upto) {
+  const deltas = new Map();
+  if (!wetRounds.size) return deltas;
+  for (const [name, d] of drivers) {
+    let wSum = 0, wN = 0, dSum = 0, dN = 0;
+    for (const rd of d.rounds) {
+      if (wetRounds.has(upto - rd.age)) { wSum += rd.pts; wN++; }
+      else { dSum += rd.pts; dN++; }
+    }
+    if (wN && dN) deltas.set(name, (wSum / wN - dSum / dN) * (wN / (wN + 2)));
+  }
+  return deltas;
+}
+
+// ---------- Analysis 6: form predictor ----------
+async function formPredictor() {
+  const last = await getLatestRound();
+  const { allResults, allSprints, allQuali } = await loadModelData(last);
+  const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, last), allResults[last - 1]);
+  const preds = predictDrivers(drivers);
+  const deltas = teammateDeltas(drivers);
+
+  title("Predicted points · next round");
+  [...preds.entries()].sort((a, b) => b[1].norm - a[1].norm).slice(0, 10).forEach(([n, p], i) => {
+    const dl = deltas.get(n) ?? 0;
+    rowHTML(i + 1, n, p.norm.toFixed(1) + " pts", "",
+      `pace ${p.pace.toFixed(1)} · quali trend ${p.qualiTrend >= 0 ? "+" : ""}${p.qualiTrend.toFixed(1)} pos`
+      + ` · finishes ${Math.round(p.reliability * 100)}% · vs teammate ${dl >= 0 ? "+" : ""}${Math.round(dl)} pts`);
+  });
+
+  // momentum: avg % increase relative to the driver's own points base
+  const byMomentum = [], skipped = [];
+  for (const [name, d] of drivers) {
+    let cum = 0;
+    const s = d.rounds.map(rd => cum += rd.pts);
+    const pcts = [];
+    for (let i = 1; i < s.length; i++)
+      if (s[i - 1] > 0) pcts.push(((s[i] - s[i - 1]) / s[i - 1]) * 100);
+    if (pcts.length < 3) { skipped.push(`${name} — fewer than 3 scoring rounds`); continue; }
+    byMomentum.push({ name, avg: pcts.reduce((a, b) => a + b, 0) / pcts.length, now: cum });
+  }
+  byMomentum.sort((a, b) => b.avg - a.avg);
+
+  // per-round fantasy points (same approximate scoring as Fantasy top 3) for the dropdowns
+  const fantasyByRound = new Map();
+  allResults.forEach((results, r) => {
+    for (const res of results) {
+      const nm = res.Driver.familyName;
+      if (!fantasyByRound.has(nm)) fantasyByRound.set(nm, []);
+      fantasyByRound.get(nm).push({
+        r: r + 1,
+        pts: fantasyPoints(parseInt(res.position, 10) || 25, parseInt(res.grid, 10) || 25,
+          res.status, res.FastestLap?.rank === "1"),
+      });
+    }
+  });
+
+  title("Momentum · avg % increase per round");
+  byMomentum.slice(0, 10).forEach((d, i) => {
+    const rounds = fantasyByRound.get(d.name) ?? [];
+    const total = rounds.reduce((a, x) => a + x.pts, 0);
+    out.insertAdjacentHTML("beforeend",
+      `<details class="row"><summary><span class="pos">${i + 1}</span>`
+      + `<span class="name">${d.name}<span class="detail">now: ${Math.round(d.now)} pts · fantasy total: ${total}</span></span>`
+      + `<span class="val ${d.avg > 0 ? "up" : ""}">${pct(d.avg)}/rd</span></summary>`
+      + `<div class="rounds">${rounds.map(x =>
+          `<span>R${x.r}<b class="${x.pts < 0 ? "neg" : ""}">${x.pts}</b></span>`).join("")}</div></details>`);
+  });
+  note("Tap a driver to see their fantasy points per round (approximate scoring — bonuses not included).");
+  if (skipped.length) { title("Not enough data for % trend"); skipped.forEach(s => note(s)); }
+
+  note("Model: recency-weighted (λ=0.85) race+sprint points on finished rounds, shrunk toward the field average, "
+    + "adjusted by qualifying trend, scaled by finish rate, normalized to 101 pts across the field.");
+}
+
+// ---------- Analysis 7: race forecast ----------
+async function raceForecast() {
+  const last = await getLatestRound();
+  const sched = await fetchCached(`${API}/current.json?limit=30`);
+  const races = sched.MRData.RaceTable.Races;
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = races.filter(r => r.date > today).slice(0, 3);
+  if (!upcoming.length) { note("Season complete — no upcoming races."); return; }
+
+  setStatus("Fetching race-day weather…", true);
+  const weather = [];
+  for (const race of upcoming) {
+    const { lat, long } = race.Circuit.Location;
+    try {
+      const w = await fetchCached(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${long}`
+        + `&daily=precipitation_probability_max,precipitation_sum&timezone=auto`
+        + `&start_date=${race.date}&end_date=${race.date}`);
+      weather.push({ rain: w.daily.precipitation_probability_max[0], mm: w.daily.precipitation_sum[0] });
+    } catch { weather.push(null); }
+  }
+
+  title("Upcoming races · race-day rain risk");
+  upcoming.forEach((race, i) => {
+    const w = weather[i], hasRain = w && w.rain != null;
+    rowHTML("R" + race.round, race.raceName,
+      hasRain ? `${w.rain}% rain` : "beyond forecast",
+      hasRain && w.rain >= 50 ? "down" : "",
+      `${race.Circuit.circuitName} · ${race.date}`);
+  });
+
+  const next = upcoming[0], w0 = weather[0];
+  const rainProb = w0?.rain != null ? w0.rain / 100 : 0;
+
+  const { allResults, allSprints, allQuali } = await loadModelData(last);
+  const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, last), allResults[last - 1]);
+  const preds = predictDrivers(drivers);
+  const wetRounds = await loadWetRounds(last);
+  const wetSkill = wetSkillDeltas(drivers, wetRounds, last);
+
+  // circuit record: wins/podiums/points at this track over the past seasons
+  let track = new Map();
+  try {
+    track = await loadTrackRecord(next.Circuit.circuitId, parseInt(sched.MRData.RaceTable.season, 10));
+  } catch {}
+
+  const roundPts = next.Sprint ? ROUND_PTS + 36 : ROUND_PTS;
+  const fieldMean = roundPts / (preds.size || 1);
+  const rows = [];
+  for (const [name, p] of preds) {
+    let pts = p.norm;
+    const tr = track.get(name);
+    if (tr) {
+      // more visits here = more trust in the track record, capped at TRACK_WEIGHT
+      const tw = TRACK_WEIGHT * (tr.races / (tr.races + 2));
+      pts = (1 - tw) * pts + tw * tr.avg;
+    }
+    // driver-specific wet skill first, then residual compression: rain still hides car pace
+    pts += rainProb * (wetSkill.get(name) ?? 0);
+    const k = (wetSkill.size ? 0.3 : 0.5) * rainProb;
+    pts = Math.max(0, (1 - k) * pts + k * fieldMean);
+    rows.push({ name, pts, tr, ws: wetSkill.get(name) });
+  }
+  const sum = rows.reduce((a, r) => a + r.pts, 0);
+  rows.forEach(r => r.pts *= roundPts / sum);
+  rows.sort((a, b) => b.pts - a.pts);
+
+  title(`Forecast · ${next.raceName} · ${next.date}${next.Sprint ? " · sprint weekend" : ""}`);
+  rows.slice(0, 10).forEach((r, i) =>
+    rowHTML(i + 1, r.name, r.pts.toFixed(1) + " pts", "",
+      (r.tr ? `here: ${r.tr.wins}W/${r.tr.podiums}P in ${r.tr.races}, avg ${Math.round(r.tr.avg)} pts · `
+            : "first time at this track · ")
+      + (r.ws != null ? `wet skill ${r.ws >= 0 ? "+" : ""}${r.ws.toFixed(1)} · ` : "")
+      + (w0?.rain != null ? `rain risk ${w0.rain}%` : "no forecast yet")));
+
+  // who owns this track — current drivers only
+  const owners = [...track.entries()].filter(([n]) => preds.has(n))
+    .sort((a, b) => b[1].wins - a[1].wins || b[1].avg - a[1].avg).slice(0, 5);
+  if (owners.length) {
+    title(`Track record · ${next.Circuit.circuitName} (last ${HISTORY_YEARS} yrs)`);
+    owners.forEach(([n, r], i) =>
+      rowHTML(i + 1, n, r.wins + (r.wins === 1 ? " win" : " wins"), r.wins ? "up" : "",
+        `${r.podiums} podium${r.podiums === 1 ? "" : "s"} in ${r.races} race${r.races === 1 ? "" : "s"} · weighted avg ${r.avg.toFixed(1)} pts`));
+  }
+
+  note((wetRounds.size
+      ? `Wet rounds so far: ${[...wetRounds].sort((a, b) => a - b).map(r => "R" + r).join(", ")} (OpenF1 rainfall data) — wet skill is each driver's wet-vs-dry points delta, shrunk by sample size. `
+      : "No wet races detected this season (OpenF1) — rain adjustment is field compression only. ")
+    + `Track record blends up to ${TRACK_WEIGHT * 100}% of a driver's last-${HISTORY_YEARS}-seasons form here, `
+    + "weighted toward recent years and by how often they've raced the track. Weather forecasts only reach ~16 days out.");
+}
+
+// ---------- Analysis 8: walk-forward backtest ----------
+async function backtest() {
+  const last = await getLatestRound();
+  if (last < 5) { note("Need at least 5 completed rounds to backtest."); return; }
+  const { allResults, allSprints, allQuali } = await loadModelData(last);
+
+  const totalErr = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
+  const perRound = [];
+  let n = 0;
+
+  // predict each round k from rounds 1..k-1 only, score against what actually happened
+  for (let k = 5; k <= last; k++) {
+    setStatus(`Backtesting round ${k}…`, true);
+    const actual = new Map(), sp = new Map();
+    for (const sr of allSprints[k - 1]) sp.set(sr.Driver.familyName, parseFloat(sr.points) || 0);
+    for (const res of allResults[k - 1]) {
+      const nm = res.Driver.familyName;
+      actual.set(nm, (parseFloat(res.points) || 0) + (sp.get(nm) ?? 0));
+    }
+    const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, k - 1), allResults[k - 2]);
+    const model = predictDrivers(drivers);
+    const roundErr = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
+    for (const [nm, act] of actual) {
+      const d = drivers.get(nm);
+      const season = d ? d.rounds.reduce((a, rd) => a + rd.pts, 0) / d.rounds.length : 0;
+      const recent = (d?.rounds ?? []).filter(rd => rd.age < 4);
+      const last4 = recent.length ? recent.reduce((a, rd) => a + rd.pts, 0) / recent.length : 0;
+      roundErr["Season average"] += Math.abs(season - act);
+      roundErr["Last-4 average"] += Math.abs(last4 - act);
+      roundErr["Full model"] += Math.abs((model.get(nm)?.norm ?? 0) - act);
+      n++;
+    }
+    for (const m in roundErr) totalErr[m] += roundErr[m];
+    const winner = Object.entries(roundErr).sort((a, b) => a[1] - b[1])[0];
+    perRound.push({ k, winner: winner[0], mae: winner[1] / actual.size });
+  }
+
+  title(`Walk-forward backtest · rounds 5–${last}`);
+  Object.entries(totalErr).map(([l, e]) => [l, e / n]).sort((a, b) => a[1] - b[1])
+    .forEach(([label, mae], i) => rowHTML(i + 1, label, mae.toFixed(2) + " MAE", i === 0 ? "up" : ""));
+
+  title("Best method per round");
+  perRound.forEach(r => rowHTML("R" + r.k, r.winner, r.mae.toFixed(2) + " MAE"));
+  note(`Each round predicted using only the rounds before it — ${n} driver-round predictions scored across `
+    + `${perRound.length} rounds. MAE = mean absolute points error per driver (lower is better).`);
+}
+
+// ---------- Analysis 9: team optimizer ----------
+function priceKey(kind, name) { return `pw-price:${kind}:${name}`; }
+
+async function teamOptimizer() {
+  const last = await getLatestRound();
+  const { allResults, allSprints, allQuali } = await loadModelData(last);
+  const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, last), allResults[last - 1]);
+  const preds = predictDrivers(drivers);
+
+  // constructor prediction = sum of its drivers' predictions
+  const teamPred = new Map();
+  for (const p of preds.values()) teamPred.set(p.team, (teamPred.get(p.team) ?? 0) + p.norm);
+
+  title("Team optimizer · driver prices ($M)");
+  note("Enter current prices from the official F1 Fantasy game — they're saved on this device. Leave blank to exclude.");
+  const priceInput = (kind, name, pts) =>
+    `<div class="row"><span class="name">${name}<span class="detail">predicted ${pts.toFixed(1)} pts</span></span>`
+    + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" type="number" `
+    + `min="0" step="0.1" placeholder="$M" value="${localStorage.getItem(priceKey(kind, name)) ?? ""}"></div>`;
+  [...preds.keys()].sort((a, b) => preds.get(b).norm - preds.get(a).norm)
+    .forEach(nm => out.insertAdjacentHTML("beforeend", priceInput("d", nm, preds.get(nm).norm)));
+  title("Constructor prices ($M)");
+  [...teamPred.keys()].sort((a, b) => teamPred.get(b) - teamPred.get(a))
+    .forEach(t => out.insertAdjacentHTML("beforeend", priceInput("c", t, teamPred.get(t))));
+  out.insertAdjacentHTML("beforeend",
+    `<div class="row"><span class="name">Budget ($M)</span>`
+    + `<input id="budget" type="number" min="0" step="0.5" value="${localStorage.getItem("pw-budget") ?? 100}"></div>`
+    + `<button class="optimize" onclick="optimizeTeam()">Optimize · 5 drivers + 2 constructors</button><div id="optOut"></div>`);
+}
+
+function combos(items, k, start, chosen, cb) {
+  if (chosen.length === k) { cb(chosen); return; }
+  for (let i = start; i <= items.length - (k - chosen.length); i++) {
+    chosen.push(items[i]);
+    combos(items, k, i + 1, chosen, cb);
+    chosen.pop();
+  }
+}
+
+function optimizeTeam() {
+  const ds = [], cs = [];
+  document.querySelectorAll("input.price").forEach(inp => {
+    if (inp.value !== "") localStorage.setItem(priceKey(inp.dataset.kind, inp.dataset.name), inp.value);
+    else localStorage.removeItem(priceKey(inp.dataset.kind, inp.dataset.name));
+    const price = parseFloat(inp.value);
+    if (!(price > 0)) return;
+    (inp.dataset.kind === "d" ? ds : cs).push({ name: inp.dataset.name, price, pts: parseFloat(inp.dataset.pts) });
+  });
+  const budget = parseFloat(document.getElementById("budget").value) || 100;
+  localStorage.setItem("pw-budget", budget);
+  const optOut = document.getElementById("optOut");
+  if (ds.length < 5 || cs.length < 2) {
+    optOut.innerHTML = `<p class="err">Need prices for at least 5 drivers and 2 constructors.</p>`;
+    return;
+  }
+
+  let best = null;
+  combos(ds, 5, 0, [], five => {
+    const dPrice = five.reduce((a, x) => a + x.price, 0);
+    if (dPrice > budget) return;
+    const dPts = five.reduce((a, x) => a + x.pts, 0);
+    for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) {
+      const price = dPrice + cs[i].price + cs[j].price;
+      if (price > budget) continue;
+      const pts = dPts + cs[i].pts + cs[j].pts;
+      if (!best || pts > best.pts) best = { five: [...five], pair: [cs[i], cs[j]], price, pts };
+    }
+  });
+  if (!best) { optOut.innerHTML = `<p class="err">No combination fits the $${budget}M budget.</p>`; return; }
+  optOut.innerHTML =
+    `<div class="section-title">Best team · ${best.pts.toFixed(1)} pred pts · $${best.price.toFixed(1)}M</div>`
+    + best.five.map(x => `<div class="row"><span class="name">${x.name}</span>`
+      + `<span class="val">$${x.price.toFixed(1)}M · ${x.pts.toFixed(1)} pts</span></div>`).join("")
+    + best.pair.map(x => `<div class="row"><span class="name">${x.name}<span class="detail">constructor</span></span>`
+      + `<span class="val">$${x.price.toFixed(1)}M · ${x.pts.toFixed(1)} pts</span></div>`).join("");
+}
+
+// offline shell: no-op when sw.js isn't present (e.g. opening the file directly)
+if ("serviceWorker" in navigator && location.protocol.startsWith("http"))
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+
+setStatus("Pick an analysis to begin.", false);
+</script>
+</body>
+</html>
