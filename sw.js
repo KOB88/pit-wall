@@ -1,4 +1,4 @@
-const CACHE = "pit-wall-v5";
+const CACHE = "pit-wall-v6";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png"];
 
 self.addEventListener("install", e => {

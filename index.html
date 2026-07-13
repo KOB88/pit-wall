@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Pit Wall — F1 Fantasy Analyzer</title>
-<meta name="theme-color" content="#101216">
+<meta name="theme-color" content="#15151e">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -14,15 +14,15 @@
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75,500..800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #101216;
-    --panel: #181b21;
-    --panel-2: #1f232b;
-    --line: #2a2f39;
-    --text: #e8eaee;
-    --dim: #8b919d;
-    --accent: #ffd24a;      /* timing-screen yellow */
-    --up: #4ade80;
-    --down: #f0716a;
+    --bg: #0a0a0f;
+    --panel: #15151e;       /* F1 carbon dark */
+    --panel-2: #1f1f2b;
+    --line: #2d2d3a;
+    --text: #f2f2f5;
+    --dim: #9a9aa5;
+    --accent: #ff1801;      /* F1 red */
+    --up: #27d17f;
+    --down: #ff8a80;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
@@ -130,7 +130,7 @@
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
     text-transform: uppercase; letter-spacing: 0.04em;
     width: 100%; padding: 12px; margin: 10px 0; border-radius: 6px; cursor: pointer;
-    background: var(--accent); border: none; color: #14161a;
+    background: var(--accent); border: none; color: #fff;
   }
 
   @media (prefers-reduced-motion: no-preference) {
@@ -258,6 +258,38 @@ function sparkline(vals) {
     + `<polyline points="${vals.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ")}"/></svg>`;
 }
 
+// ---------- flags ----------
+const NAT_CC = { British: "GB", Dutch: "NL", Monegasque: "MC", Spanish: "ES", Mexican: "MX",
+  German: "DE", French: "FR", Finnish: "FI", Australian: "AU", Canadian: "CA", Japanese: "JP",
+  Chinese: "CN", Thai: "TH", Danish: "DK", Italian: "IT", American: "US", Brazilian: "BR",
+  Argentine: "AR", Argentinian: "AR", "New Zealander": "NZ", Swiss: "CH", Swedish: "SE",
+  Belgian: "BE", Austrian: "AT", Polish: "PL", Russian: "RU", Estonian: "EE", Colombian: "CO",
+  Indonesian: "ID", Irish: "IE" };
+const COUNTRY_CC = { Belgium: "BE", Hungary: "HU", Netherlands: "NL", Italy: "IT", UK: "GB",
+  USA: "US", "United States": "US", Monaco: "MC", Spain: "ES", Canada: "CA", Austria: "AT",
+  France: "FR", Azerbaijan: "AZ", Singapore: "SG", Japan: "JP", China: "CN", Mexico: "MX",
+  Brazil: "BR", UAE: "AE", "Saudi Arabia": "SA", Bahrain: "BH", Qatar: "QA", Australia: "AU",
+  Germany: "DE", Portugal: "PT", Turkey: "TR", Russia: "RU", Korea: "KR", "South Korea": "KR",
+  India: "IN", Malaysia: "MY", "South Africa": "ZA", Argentina: "AR", Vietnam: "VN" };
+
+function isoFlag(cc) {
+  return cc.toUpperCase().replace(/./g, c => String.fromCodePoint(0x1F1A5 + c.charCodeAt(0)));
+}
+
+const driverFlags = new Map();
+function noteFlag(driver) {
+  const cc = NAT_CC[driver.nationality];
+  if (cc && !driverFlags.has(driver.familyName)) driverFlags.set(driver.familyName, isoFlag(cc));
+}
+function dn(name) { // driver name with nationality flag
+  const f = driverFlags.get(name);
+  return f ? `${f} ${name}` : name;
+}
+function countryFlag(country) {
+  const cc = COUNTRY_CC[country];
+  return cc ? isoFlag(cc) + " " : "";
+}
+
 // ---------- shared data loaders ----------
 async function loadAllResults(last) {
   const urls = [];
@@ -340,7 +372,7 @@ async function fantasyTop() {
 
   const top = m => [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   title("Top 3 drivers · fantasy pts");
-  top(dTot).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
+  top(dTot).forEach(([n, v], i) => rowHTML(i + 1, dn(n), Math.round(v) + " pts"));
   title("Top 3 teams · fantasy pts");
   top(tTot).forEach(([n, v], i) => rowHTML(i + 1, n, Math.round(v) + " pts"));
   note("Includes overtake (≈ positions gained), Q2/Q3, sprint, and fastest-pit-stop (+10/+5/+3, teams only) "
@@ -358,6 +390,7 @@ async function pitStops() {
     for (const res of results) {
       idName.set(res.Driver.driverId, res.Driver.familyName);
       idTeam.set(res.Driver.driverId, res.Constructor.name);
+      noteFlag(res.Driver);
     }
   }
   for (const stops of await loadAllPitStops(last)) {
@@ -381,7 +414,7 @@ async function pitStops() {
 
   const fastest = m => [...m.entries()].sort((a, b) => a[1] - b[1]).slice(0, 5);
   title("Fastest avg pit stop · drivers");
-  fastest(driverAvg).forEach(([n, v], i) => rowHTML(i + 1, n, v.toFixed(3) + "s"));
+  fastest(driverAvg).forEach(([n, v], i) => rowHTML(i + 1, dn(n), v.toFixed(3) + "s"));
   title("Fastest avg pit stop · teams");
   fastest(teamAvg).forEach(([n, v], i) => rowHTML(i + 1, n, v.toFixed(3) + "s"));
   note("Durations are total pit lane time, not stationary time."
@@ -440,6 +473,7 @@ function buildDriverData(allResults, allSprints, allQuali, upto) {
     }
     for (const res of allResults[r]) {
       const n = res.Driver.familyName;
+      noteFlag(res.Driver);
       if (!drivers.has(n)) drivers.set(n, { rounds: [], team: "" });
       const d = drivers.get(n);
       d.team = res.Constructor.name;
@@ -557,6 +591,7 @@ async function loadTrackRecord(circuitId, season) {
     for (const race of j.MRData.RaceTable.Races ?? [])
       for (const res of race.Results ?? []) {
         const n = res.Driver.familyName;
+        noteFlag(res.Driver);
         if (!rec.has(n)) rec.set(n, { pSum: 0, wSum: 0, races: 0, wins: 0, podiums: 0 });
         const r = rec.get(n);
         const pos = parseInt(res.position, 10) || 25;
@@ -600,7 +635,7 @@ async function formPredictor() {
   title("Predicted fantasy pts · next round");
   [...preds.entries()].sort((a, b) => b[1].norm - a[1].norm).slice(0, 10).forEach(([n, p], i) => {
     const dl = deltas.get(n) ?? 0;
-    rowHTML(i + 1, n, p.norm.toFixed(1) + " pts", "",
+    rowHTML(i + 1, dn(n), p.norm.toFixed(1) + " pts", "",
       `pace ${p.pace.toFixed(1)} · quali trend ${p.qualiTrend >= 0 ? "+" : ""}${p.qualiTrend.toFixed(1)} pos`
       + ` · finishes ${Math.round(p.reliability * 100)}% · vs teammate ${dl >= 0 ? "+" : ""}${Math.round(dl)} pts`);
   });
@@ -624,7 +659,7 @@ async function formPredictor() {
     const total = rounds.reduce((a, x) => a + x.pts, 0);
     out.insertAdjacentHTML("beforeend",
       `<details class="row"><summary><span class="pos">${i + 1}</span>`
-      + `<span class="name">${d.name}<span class="detail">now: ${Math.round(d.now)} pts · fantasy total: ${total}</span></span>`
+      + `<span class="name">${dn(d.name)}<span class="detail">now: ${Math.round(d.now)} pts · fantasy total: ${total}</span></span>`
       + `<span class="val ${d.avg > 0 ? "up" : ""}">${pct(d.avg)}/rd</span></summary>`
       + `<div class="rounds-wrap">${sparkline(rounds.map(x => x.pts))}`
       + `<div class="rounds">${rounds.map(x =>
@@ -662,7 +697,7 @@ async function raceForecast() {
   title("Upcoming races · race-day rain risk");
   upcoming.forEach((race, i) => {
     const w = weather[i], hasRain = w && w.rain != null;
-    rowHTML("R" + race.round, race.raceName,
+    rowHTML("R" + race.round, countryFlag(race.Circuit.Location.country) + race.raceName,
       hasRain ? `${w.rain}% rain` : "beyond forecast",
       hasRain && w.rain >= 50 ? "down" : "",
       `${race.Circuit.circuitName} · ${race.date}`);
@@ -702,9 +737,9 @@ async function raceForecast() {
   }
   rows.sort((a, b) => b.pts - a.pts);
 
-  title(`Forecast · fantasy pts · ${next.raceName} · ${next.date}${next.Sprint ? " · sprint weekend" : ""}`);
+  title(`Forecast · fantasy pts · ${countryFlag(next.Circuit.Location.country)}${next.raceName} · ${next.date}${next.Sprint ? " · sprint weekend" : ""}`);
   rows.slice(0, 10).forEach((r, i) =>
-    rowHTML(i + 1, r.name, r.pts.toFixed(1) + " pts", "",
+    rowHTML(i + 1, dn(r.name), r.pts.toFixed(1) + " pts", "",
       (r.tr ? `here: ${r.tr.wins}W/${r.tr.podiums}P in ${r.tr.races}, avg ${Math.round(r.tr.avg)} pts · `
             : "first time at this track · ")
       + (r.ws != null ? `wet skill ${r.ws >= 0 ? "+" : ""}${r.ws.toFixed(1)} · ` : "")
@@ -714,9 +749,9 @@ async function raceForecast() {
   const owners = [...track.entries()].filter(([n]) => preds.has(n))
     .sort((a, b) => b[1].wins - a[1].wins || b[1].avg - a[1].avg).slice(0, 5);
   if (owners.length) {
-    title(`Track record · ${next.Circuit.circuitName} (last ${HISTORY_YEARS} yrs)`);
+    title(`Track record · ${countryFlag(next.Circuit.Location.country)}${next.Circuit.circuitName} (last ${HISTORY_YEARS} yrs)`);
     owners.forEach(([n, r], i) =>
-      rowHTML(i + 1, n, r.wins + (r.wins === 1 ? " win" : " wins"), r.wins ? "up" : "",
+      rowHTML(i + 1, dn(n), r.wins + (r.wins === 1 ? " win" : " wins"), r.wins ? "up" : "",
         `${r.podiums} podium${r.podiums === 1 ? "" : "s"} in ${r.races} race${r.races === 1 ? "" : "s"} · weighted avg ${r.avg.toFixed(1)} pts`));
   }
 
@@ -825,7 +860,7 @@ async function teamOptimizer() {
   title("Team optimizer · driver prices ($M)");
   note("Enter current prices from the official F1 Fantasy game — they're saved on this device. Leave blank to exclude.");
   const priceInput = (kind, name, pts) =>
-    `<div class="row"><span class="name">${name}<span class="detail">predicted ${pts.toFixed(1)} pts</span></span>`
+    `<div class="row"><span class="name">${kind === "d" ? dn(name) : name}<span class="detail">predicted ${pts.toFixed(1)} pts</span></span>`
     + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" type="number" `
     + `min="0" step="0.1" placeholder="$M" value="${localStorage.getItem(priceKey(kind, name)) ?? ""}"></div>`;
   [...preds.keys()].sort((a, b) => preds.get(b).norm - preds.get(a).norm)
@@ -881,7 +916,7 @@ function optimizeTeam() {
   if (!best) { optOut.innerHTML = `<p class="err">No combination fits the $${budget}M budget.</p>`; return; }
   optOut.innerHTML =
     `<div class="section-title">Best team · ${best.pts.toFixed(1)} pred pts · $${best.price.toFixed(1)}M</div>`
-    + best.five.map(x => `<div class="row"><span class="name">${x.name}`
+    + best.five.map(x => `<div class="row"><span class="name">${dn(x.name)}`
       + `${x === best.cap ? `<span class="detail">DRS boost — counts double</span>` : ""}</span>`
       + `<span class="val${x === best.cap ? " up" : ""}">$${x.price.toFixed(1)}M · `
       + `${(x === best.cap ? 2 * x.pts : x.pts).toFixed(1)} pts</span></div>`).join("")
