@@ -133,8 +133,43 @@
     background: var(--accent); border: none; color: #fff;
   }
 
+  /* ---- live timing ---- */
+  .lt-head { display: flex; align-items: center; gap: 10px; margin: 16px 0 6px; flex-wrap: wrap; }
+  .lt-title { font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 800; font-size: 18px;
+    text-transform: uppercase; letter-spacing: 0.02em; }
+  .lt-badge { font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 4px; }
+  .lt-badge.live { background: var(--accent); color: #fff; }
+  .lt-badge.past { background: var(--panel-2); color: var(--dim); border: 1px solid var(--line); }
+  .lt-sub { color: var(--dim); font-size: 12px; width: 100%; }
+  .track { width: 100%; height: 240px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; margin-bottom: 12px; display: block; }
+  .track .outline { fill: none; stroke: #3a3f4b; stroke-width: 6; stroke-linejoin: round; stroke-linecap: round; }
+  .track .sf { stroke: var(--dim); stroke-width: 3; }
+  .track .car { stroke: #0a0a0f; stroke-width: 1.5; }
+  .track .carnum { fill: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 11px;
+    text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: #0a0a0f; stroke-width: 2.5; }
+  .tt-row { display: grid; grid-template-columns: 2ch 8px 1fr auto; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; margin-bottom: 4px; }
+  .tt-row .p { color: var(--dim); font-weight: 600; text-align: right; }
+  .tt-row .bar { width: 4px; height: 22px; border-radius: 2px; }
+  .tt-row .who { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+  .tt-row .acr { font-weight: 600; }
+  .tt-row .team { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tt-row .data { display: flex; align-items: center; gap: 10px; font-size: 12px; white-space: nowrap; }
+  .tt-row .gap { color: var(--dim); min-width: 6ch; text-align: right; }
+  .tt-row .lap { min-width: 8ch; text-align: right; }
+  .tyre { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border-radius: 50%; font-size: 10px; font-weight: 700; border: 2px solid; }
+  .tyre.S { border-color: #ff3b3b; color: #ff3b3b; }
+  .tyre.M { border-color: #ffd24a; color: #ffd24a; }
+  .tyre.H { border-color: #e8eaee; color: #e8eaee; }
+  .tyre.I { border-color: #4ade80; color: #4ade80; }
+  .tyre.W { border-color: #4aa3ff; color: #4aa3ff; }
+
   @media (prefers-reduced-motion: no-preference) {
     .blink { animation: pulse 1s ease-in-out infinite; }
+    .lt-badge.live { animation: pulse 1.4s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: 0.35; } }
   }
 </style>
@@ -147,6 +182,7 @@
 </header>
 
 <nav aria-label="Analyses">
+  <button onclick="run(liveTiming, this)">Live timing<small>Track map &amp; timing tower</small></button>
   <button onclick="run(fantasyTop, this)">Fantasy top 3<small>Drivers &amp; teams, full scoring</small></button>
   <button onclick="run(pitStops, this)">Pit stop pace<small>Fastest avg, drivers &amp; teams</small></button>
   <button onclick="run(overtakes, this)">Overtake trend<small>Positions gained per round</small></button>
@@ -222,13 +258,17 @@ async function getLatestRound() {
   return latestRound;
 }
 
+let liveTimer = null;
+function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+
 async function run(analysis, btn) {
+  stopLive(); // leaving any live-timing poll behind would keep hammering the API
   document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
   out.innerHTML = "";
   try {
     await analysis();
-    setStatus("Done. Data cached — repeat runs are instant.", false);
+    if (analysis !== liveTiming) setStatus("Done. Data cached — repeat runs are instant.", false);
   } catch (e) {
     setStatus("", false);
     out.innerHTML = `<p class="err">Something went wrong: ${e.message}. Check your connection and try again.</p>`;
@@ -1001,6 +1041,159 @@ function optimizeTeam() {
 // offline shell: no-op when sw.js isn't present (e.g. opening the file directly)
 if ("serviceWorker" in navigator && location.protocol.startsWith("http"))
   navigator.serviceWorker.register("sw.js").catch(() => {});
+
+// ---------- Analysis: live timing (OpenF1) ----------
+const OF1 = "https://api.openf1.org/v1";
+const GE = "date%3E=", LE = "date%3C=";
+const TYRE_LETTER = { SOFT: "S", MEDIUM: "M", HARD: "H", INTERMEDIATE: "I", WET: "W" };
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function ofJson(path, tries = 4) {
+  for (let a = 0; ; a++) {
+    const res = await fetch(OF1 + path);
+    if (res.status === 429 && a < tries) { await sleep(700 * (a + 1)); continue; } // OpenF1 rate limit
+    if (res.status === 404) return []; // OpenF1 says 404 for a query that matched no rows
+    if (!res.ok) throw new Error("OpenF1 " + res.status);
+    return res.json();
+  }
+}
+
+// run thunks with limited concurrency so we don't burst past the rate limit
+async function pool(thunks, n = 2) {
+  const out = new Array(thunks.length);
+  let i = 0;
+  async function worker() { while (i < thunks.length) { const k = i++; out[k] = await thunks[k](); } }
+  await Promise.all(Array.from({ length: Math.min(n, thunks.length) }, worker));
+  return out;
+}
+function latestByDriver(arr, newer) {
+  const m = new Map();
+  for (const x of arr) { const c = m.get(x.driver_number); if (!c || newer(x, c)) m.set(x.driver_number, x); }
+  return m;
+}
+function fmtGap(v) { return v == null ? "—" : (typeof v === "string" ? v : "+" + v.toFixed(3)); }
+function fmtLap(sec) { return Math.floor(sec / 60) + ":" + (sec % 60).toFixed(3).padStart(6, "0"); }
+
+let ltPath = null, ltTf = null, ltKey = null; // track outline + transform, cached per session
+
+async function buildOutline(s, num) {
+  const start = Date.parse(s.date_start), endRef = Math.min(Date.now(), Date.parse(s.date_end));
+  const mid = start + (endRef - start) * 0.5; // mid-session = clean green-flag running
+  const from = new Date(mid).toISOString(), to = new Date(mid + 130000).toISOString();
+  const loc = await ofJson(`/location?session_key=${s.session_key}&driver_number=${num}&${GE}${from}&${LE}${to}`);
+  const pts = loc.filter(p => p.x || p.y).map(p => [p.x, p.y]);
+  if (pts.length < 20) { ltPath = ltTf = null; return; }
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const w = maxX - minX || 1, h = maxY - minY || 1, scale = 920 / Math.max(w, h);
+  const ox = (1000 - w * scale) / 2, oy = (1000 - h * scale) / 2;
+  ltPath = pts;
+  ltTf = ([x, y]) => [ox + (x - minX) * scale, oy + (maxY - y) * scale]; // flip Y for SVG
+}
+
+function paintTrack(carLatest, dinfo) {
+  const svg = document.getElementById("lt-track");
+  if (!ltPath || !ltTf) { svg.innerHTML = `<text x="500" y="500" fill="#8b919d" font-size="34" text-anchor="middle">track map unavailable</text>`; return; }
+  const d = "M" + ltPath.map(p => ltTf(p).map(n => n.toFixed(1)).join(",")).join(" L") + "Z";
+  let dots = "";
+  for (const [num, p] of carLatest) {
+    const info = dinfo.get(num);
+    if (!info) continue; // skip stray numbers (safety car etc.) not in the driver list
+    const [cx, cy] = ltTf([p.x, p.y]);
+    const col = info.team_colour ? "#" + info.team_colour : "#888";
+    dots += `<circle class="car" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="17" fill="${col}"/>`
+      + `<text class="carnum" x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="20">${num}</text>`;
+  }
+  svg.innerHTML = `<path class="outline" d="${d}"/>${dots}`;
+}
+
+function renderTower(position, intervals, laps, stints, dinfo) {
+  const pos = latestByDriver(position, (a, b) => a.date > b.date);
+  const intv = latestByDriver(intervals, (a, b) => a.date > b.date);
+  const lap = latestByDriver(laps, (a, b) => a.lap_number > b.lap_number);
+  const stint = latestByDriver(stints, (a, b) => a.lap_start > b.lap_start);
+  const order = [...pos.values()].sort((a, b) => a.position - b.position);
+  let html = "";
+  for (const p of order) {
+    const num = p.driver_number, info = dinfo.get(num) || {};
+    const col = info.team_colour ? "#" + info.team_colour : "#666";
+    const gap = p.position === 1 ? "LEADER" : fmtGap(intv.get(num)?.gap_to_leader);
+    const ll = lap.get(num)?.lap_duration, tl = TYRE_LETTER[stint.get(num)?.compound] || "";
+    html += `<div class="tt-row"><span class="p">${p.position}</span>`
+      + `<span class="bar" style="background:${col}"></span>`
+      + `<span class="who"><span class="acr">${info.name_acronym || num}</span>`
+      + `<span class="team">${info.team_name || ""}</span></span>`
+      + `<span class="data">${tl ? `<span class="tyre ${tl}">${tl}</span>` : ""}`
+      + `<span class="lap">${ll ? fmtLap(ll) : "—"}</span>`
+      + `<span class="gap">${gap}</span></span></div>`;
+  }
+  document.getElementById("lt-tower").innerHTML = html;
+}
+
+async function liveTiming() {
+  const [sessions, drivers] = await Promise.all([
+    ofJson("/sessions?session_key=latest"), ofJson("/drivers?session_key=latest"),
+  ]);
+  const s = sessions[0];
+  if (!s) { note("No session data available from OpenF1 right now."); return; }
+  const dinfo = new Map(drivers.map(d => [d.driver_number, d]));
+  const now = Date.now(), isLive = now >= Date.parse(s.date_start) && now <= Date.parse(s.date_end) + 5 * 60e3;
+
+  out.innerHTML =
+    `<div class="lt-head"><span class="lt-title">${countryFlag(s.country_name)}${s.circuit_short_name} · ${s.session_name}</span>`
+    + `<span class="lt-badge ${isLive ? "live" : "past"}">${isLive ? "● LIVE" : "Latest session"}</span>`
+    + `<span class="lt-sub" id="lt-sub">Loading…</span></div>`
+    + `<svg class="track" id="lt-track" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet"></svg>`
+    + `<div id="lt-tower"></div>`;
+
+  if (ltKey !== s.session_key) { // the map is a bonus — never let it block the timing tower
+    try { await buildOutline(s, drivers[0]?.driver_number ?? 1); ltKey = s.session_key; } catch { ltPath = ltTf = null; }
+  }
+
+  const k = s.session_key;
+  async function refresh() {
+    try {
+      // wave 1: order, tyres, laps. When live, window laps; when past, take them all to find the true end.
+      const lapWin = new Date(Date.now() - 250000).toISOString();
+      const [position, stints, laps] = await pool([
+        () => ofJson(`/position?session_key=${k}`),
+        () => ofJson(`/stints?session_key=${k}`),
+        () => ofJson(`/laps?session_key=${k}` + (isLive ? `&date_start%3E=${lapWin}` : "")),
+      ], 2);
+
+      // anchor windows to when cars actually last ran — a finished session's date_end is padded
+      let anchor = Date.now();
+      if (!isLive) { anchor = 0; for (const l of laps) { const t = Date.parse(l.date_start) + (l.lap_duration || 0) * 1000; if (t > anchor) anchor = t; } }
+      const back = isLive ? 20000 : 130000;
+      const gapFrom = new Date(anchor - back).toISOString();
+      const snapFrom = new Date(anchor - (isLive ? 8000 : back)).toISOString(), snapTo = new Date(anchor + 2000).toISOString();
+
+      // wave 2: gaps + car positions, now correctly anchored
+      const [intervals, snap] = await pool([
+        () => ofJson(`/intervals?session_key=${k}&${GE}${gapFrom}`),
+        () => ofJson(`/location?session_key=${k}&${GE}${snapFrom}&${LE}${snapTo}`),
+      ], 2);
+
+      renderTower(position, intervals, laps, stints, dinfo);
+      paintTrack(latestByDriver(snap.filter(p => p.x || p.y), (a, b) => a.date > b.date), dinfo);
+      document.getElementById("lt-sub").textContent =
+        (isLive ? "Updating live · " : "Final positions · ") + new Date(s.date_start).toDateString()
+        + " · refreshed " + new Date().toLocaleTimeString();
+    } catch (e) {
+      const sub = document.getElementById("lt-sub");
+      if (sub) sub.textContent = "Update failed: " + e.message;
+    }
+  }
+
+  await refresh();
+  out.insertAdjacentHTML("beforeend", isLive
+    ? `<p class="note">Live data from OpenF1 — order, gaps, tyres and car positions refresh every 5 seconds.</p>`
+    : `<p class="note">No race is live now, so this shows the last session's final classification. During a live `
+      + `session the cars spread across the track map and every column updates in real time.</p>`);
+  setStatus(isLive ? "Live timing — auto-refreshing every 5s." : "Showing the latest completed session (no race live now).", false);
+  if (isLive) liveTimer = setInterval(refresh, 5000);
+}
 
 setStatus("Pick an analysis to begin.", false);
 </script>
