@@ -159,6 +159,10 @@
   .tt-row .data { display: flex; align-items: center; gap: 10px; font-size: 12px; white-space: nowrap; }
   .tt-row .gap { color: var(--dim); min-width: 6ch; text-align: right; }
   .tt-row .lap { min-width: 8ch; text-align: right; }
+  .tt-row .spd { min-width: 6ch; text-align: right; color: var(--text); }
+  .tt-row .spd i { color: var(--dim); font-style: normal; font-size: 9px; margin-left: 1px; }
+  .tt-row .drs { color: #14161a; background: var(--up); font-weight: 700; font-size: 10px;
+    padding: 1px 4px; border-radius: 3px; letter-spacing: 0.03em; }
   .tyre { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
     border-radius: 50%; font-size: 10px; font-weight: 700; border: 2px solid; }
   .tyre.S { border-color: #ff3b3b; color: #ff3b3b; }
@@ -1108,7 +1112,7 @@ function paintTrack(carLatest, dinfo) {
   svg.innerHTML = `<path class="outline" d="${d}"/>${dots}`;
 }
 
-function renderTower(position, intervals, laps, stints, dinfo) {
+function renderTower(position, intervals, laps, stints, dinfo, tele) {
   const pos = latestByDriver(position, (a, b) => a.date > b.date);
   const intv = latestByDriver(intervals, (a, b) => a.date > b.date);
   const lap = latestByDriver(laps, (a, b) => a.lap_number > b.lap_number);
@@ -1120,11 +1124,15 @@ function renderTower(position, intervals, laps, stints, dinfo) {
     const col = info.team_colour ? "#" + info.team_colour : "#666";
     const gap = p.position === 1 ? "LEADER" : fmtGap(intv.get(num)?.gap_to_leader);
     const ll = lap.get(num)?.lap_duration, tl = TYRE_LETTER[stint.get(num)?.compound] || "";
+    const tm = tele && tele.get(num), spd = tm?.speed;
+    const drsOpen = tm && tm.drs != null && tm.drs >= 10; // OpenF1: 10/12/14 = DRS active
     html += `<div class="tt-row"><span class="p">${p.position}</span>`
       + `<span class="bar" style="background:${col}"></span>`
       + `<span class="who"><span class="acr">${info.name_acronym || num}</span>`
       + `<span class="team">${info.team_name || ""}</span></span>`
       + `<span class="data">${tl ? `<span class="tyre ${tl}">${tl}</span>` : ""}`
+      + `${drsOpen ? `<span class="drs">DRS</span>` : ""}`
+      + `<span class="spd">${spd != null ? spd + `<i>km/h</i>` : ""}</span>`
       + `<span class="lap">${ll ? fmtLap(ll) : "—"}</span>`
       + `<span class="gap">${gap}</span></span></div>`;
   }
@@ -1162,23 +1170,28 @@ async function liveTiming() {
         () => ofJson(`/laps?session_key=${k}` + (isLive ? `&date_start%3E=${lapWin}` : "")),
       ], 2);
 
-      // anchor windows to when cars actually last ran — a finished session's date_end is padded
-      let anchor = Date.now();
-      if (!isLive) { anchor = 0; for (const l of laps) { const t = Date.parse(l.date_start) + (l.lap_duration || 0) * 1000; if (t > anchor) anchor = t; } }
-      const back = isLive ? 20000 : 130000;
-      const gapFrom = new Date(anchor - back).toISOString();
-      const snapFrom = new Date(anchor - (isLive ? 8000 : back)).toISOString(), snapTo = new Date(anchor + 2000).toISOString();
+      // the tower is anchored to the end of running — a finished session's date_end is padded,
+      // so find when cars actually last ran from the lap timestamps
+      let towerAnchor = Date.now();
+      const start = Date.parse(s.date_start);
+      if (!isLive) { towerAnchor = 0; for (const l of laps) { const t = Date.parse(l.date_start) + (l.lap_duration || 0) * 1000; if (t > towerAnchor) towerAnchor = t; } }
+      const gapFrom = new Date(towerAnchor - (isLive ? 20000 : 130000)).toISOString();
+      // map + telemetry: live = now; finished = a mid-race green-flag moment so cars are spread and moving
+      const snapAt = isLive ? Date.now() : start + 0.55 * (towerAnchor - start);
+      const snapFrom = new Date(snapAt - (isLive ? 8000 : 4000)).toISOString(), snapTo = new Date(snapAt + 2000).toISOString();
 
-      // wave 2: gaps + car positions, now correctly anchored
-      const [intervals, snap] = await pool([
+      // wave 2: gaps (final), car positions + telemetry (racing snapshot)
+      const [intervals, snap, cars] = await pool([
         () => ofJson(`/intervals?session_key=${k}&${GE}${gapFrom}`),
         () => ofJson(`/location?session_key=${k}&${GE}${snapFrom}&${LE}${snapTo}`),
+        () => ofJson(`/car_data?session_key=${k}&${GE}${snapFrom}&${LE}${snapTo}`),
       ], 2);
 
-      renderTower(position, intervals, laps, stints, dinfo);
+      const tele = latestByDriver(cars, (a, b) => a.date > b.date);
+      renderTower(position, intervals, laps, stints, dinfo, tele);
       paintTrack(latestByDriver(snap.filter(p => p.x || p.y), (a, b) => a.date > b.date), dinfo);
       document.getElementById("lt-sub").textContent =
-        (isLive ? "Updating live · " : "Final positions · ") + new Date(s.date_start).toDateString()
+        (isLive ? "Updating live · " : "Final classification · ") + new Date(s.date_start).toDateString()
         + " · refreshed " + new Date().toLocaleTimeString();
     } catch (e) {
       const sub = document.getElementById("lt-sub");
@@ -1188,9 +1201,10 @@ async function liveTiming() {
 
   await refresh();
   out.insertAdjacentHTML("beforeend", isLive
-    ? `<p class="note">Live data from OpenF1 — order, gaps, tyres and car positions refresh every 5 seconds.</p>`
-    : `<p class="note">No race is live now, so this shows the last session's final classification. During a live `
-      + `session the cars spread across the track map and every column updates in real time.</p>`);
+    ? `<p class="note">Live data from OpenF1 — order, gaps, tyres, speed and car positions refresh every 5 seconds. DRS lights up green when a driver has it open.</p>`
+    : `<p class="note">No race is live now. The tower shows the last session's final classification; the track map and `
+      + `speeds are sampled from a mid-race moment of that session so the cars are spread and moving. During a live `
+      + `session everything updates in real time and DRS shows when it's open.</p>`);
   setStatus(isLive ? "Live timing — auto-refreshing every 5s." : "Showing the latest completed session (no race live now).", false);
   if (isLive) liveTimer = setInterval(refresh, 5000);
 }
