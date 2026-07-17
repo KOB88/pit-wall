@@ -979,6 +979,23 @@ function optimizeTeam() {
     optOut.insertAdjacentHTML("beforeend",
       `<p class="note">Chasing your league? ${dn(hc.name)} is the higher-ceiling boost: his best rounds average `
       + `${hc.ceil.toFixed(1)} pts vs ${best.cap.name}'s ${best.cap.ceil.toFixed(1)} — riskier, bigger jackpot.</p>`);
+
+  // value = predicted points per $M — the bargains, flagged whether or not they made the best team
+  const picked = new Set([...best.five, ...best.pair].map(x => x.name));
+  const valueList = (items, kind, n) => items
+    .filter(x => x.pts > 0)
+    .map(x => ({ ...x, value: x.pts / x.price }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, n)
+    .map((x, i) => `<div class="row"><span class="pos">${i + 1}</span>`
+      + `<span class="name">${kind === "d" ? dn(x.name) : x.name}`
+      + `${picked.has(x.name) ? `<span class="detail">in your best team</span>` : ""}</span>`
+      + `<span class="val up">${x.value.toFixed(2)} pts/$M</span></div>`).join("");
+  optOut.insertAdjacentHTML("beforeend",
+    `<div class="section-title">Best value drivers · pts per $M</div>${valueList(ds, "d", 5)}`
+    + `<div class="section-title">Best value constructors · pts per $M</div>${valueList(cs, "c", 3)}`
+    + `<p class="note">Value = predicted points ÷ price. Spot the bargains the optimizer leans on — `
+    + `and the cheap upside it skipped for budget reasons.</p>`);
 }
 
 // offline shell: no-op when sw.js isn't present (e.g. opening the file directly)
