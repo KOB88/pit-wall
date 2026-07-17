@@ -149,8 +149,22 @@
   .track .car { stroke: #0a0a0f; stroke-width: 1.5; }
   .track .carnum { fill: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 11px;
     text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: #0a0a0f; stroke-width: 2.5; }
-  .tt-row { display: grid; grid-template-columns: 2ch 8px 1fr auto; align-items: center; gap: 8px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; margin-bottom: 4px; }
+  .tt-row { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 4px; }
+  .tt-row summary { display: grid; grid-template-columns: 2ch 8px 1fr auto; align-items: center; gap: 8px;
+    padding: 7px 10px; cursor: pointer; list-style: none; }
+  .tt-row summary::-webkit-details-marker { display: none; }
+  .tt-row[open] { border-color: #3a3f4b; }
+  .tele { border-top: 1px solid var(--line); padding: 8px 12px 10px; }
+  .tele .ch { display: grid; grid-template-columns: 4.5em 1fr 3.5em; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .tele .lbl { color: var(--dim); font-size: 11px; }
+  .tele .bar2 { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .tele .fill { display: block; height: 100%; border-radius: 4px; }
+  .tele .fill.thr { background: var(--up); }
+  .tele .fill.brk { background: var(--down); }
+  .tele .v { text-align: right; font-size: 12px; }
+  .tele .nums { display: flex; gap: 16px; margin-top: 7px; font-size: 12px; color: var(--dim); }
+  .tele .nums b { color: var(--text); font-weight: 600; margin-left: 4px; }
+  .tele .na { color: var(--dim); font-size: 12px; }
   .tt-row .p { color: var(--dim); font-weight: 600; text-align: right; }
   .tt-row .bar { width: 4px; height: 22px; border-radius: 2px; }
   .tt-row .who { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
@@ -1080,6 +1094,7 @@ function fmtGap(v) { return v == null ? "—" : (typeof v === "string" ? v : "+"
 function fmtLap(sec) { return Math.floor(sec / 60) + ":" + (sec % 60).toFixed(3).padStart(6, "0"); }
 
 let ltPath = null, ltTf = null, ltKey = null; // track outline + transform, cached per session
+const ltOpen = new Set(); // driver numbers whose telemetry panel is expanded (survives refreshes)
 
 async function buildOutline(s, num) {
   const start = Date.parse(s.date_start), endRef = Math.min(Date.now(), Date.parse(s.date_end));
@@ -1126,7 +1141,8 @@ function renderTower(position, intervals, laps, stints, dinfo, tele) {
     const ll = lap.get(num)?.lap_duration, tl = TYRE_LETTER[stint.get(num)?.compound] || "";
     const tm = tele && tele.get(num), spd = tm?.speed;
     const drsOpen = tm && tm.drs != null && tm.drs >= 10; // OpenF1: 10/12/14 = DRS active
-    html += `<div class="tt-row"><span class="p">${p.position}</span>`
+    html += `<details class="tt-row" data-num="${num}"${ltOpen.has(num) ? " open" : ""}><summary>`
+      + `<span class="p">${p.position}</span>`
       + `<span class="bar" style="background:${col}"></span>`
       + `<span class="who"><span class="acr">${info.name_acronym || num}</span>`
       + `<span class="team">${info.team_name || ""}</span></span>`
@@ -1134,9 +1150,24 @@ function renderTower(position, intervals, laps, stints, dinfo, tele) {
       + `${drsOpen ? `<span class="drs">DRS</span>` : ""}`
       + `<span class="spd">${spd != null ? spd + `<i>km/h</i>` : ""}</span>`
       + `<span class="lap">${ll ? fmtLap(ll) : "—"}</span>`
-      + `<span class="gap">${gap}</span></span></div>`;
+      + `<span class="gap">${gap}</span></span></summary>${teleHTML(tm)}</details>`;
   }
-  document.getElementById("lt-tower").innerHTML = html;
+  const tower = document.getElementById("lt-tower");
+  tower.innerHTML = html;
+  // keep expanded rows expanded across the 5s refreshes
+  tower.querySelectorAll("details.tt-row").forEach(d =>
+    d.addEventListener("toggle", () => { d.open ? ltOpen.add(+d.dataset.num) : ltOpen.delete(+d.dataset.num); }));
+}
+
+function teleHTML(tm) {
+  if (!tm || tm.speed == null) return `<div class="tele"><span class="na">No telemetry for this driver right now.</span></div>`;
+  const thr = Math.max(0, Math.min(100, tm.throttle ?? 0));
+  const brk = Math.max(0, Math.min(100, tm.brake ?? 0));
+  return `<div class="tele">`
+    + `<div class="ch"><span class="lbl">Throttle</span><span class="bar2"><span class="fill thr" style="width:${thr}%"></span></span><span class="v">${thr}%</span></div>`
+    + `<div class="ch"><span class="lbl">Brake</span><span class="bar2"><span class="fill brk" style="width:${brk}%"></span></span><span class="v">${brk}%</span></div>`
+    + `<div class="nums"><span>Gear<b>${tm.n_gear ?? "—"}</b></span><span>RPM<b>${tm.rpm != null ? tm.rpm.toLocaleString() : "—"}</b></span>`
+    + `<span>Speed<b>${tm.speed} km/h</b></span></div></div>`;
 }
 
 async function liveTiming() {
@@ -1201,10 +1232,11 @@ async function liveTiming() {
 
   await refresh();
   out.insertAdjacentHTML("beforeend", isLive
-    ? `<p class="note">Live data from OpenF1 — order, gaps, tyres, speed and car positions refresh every 5 seconds. DRS lights up green when a driver has it open.</p>`
-    : `<p class="note">No race is live now. The tower shows the last session's final classification; the track map and `
-      + `speeds are sampled from a mid-race moment of that session so the cars are spread and moving. During a live `
-      + `session everything updates in real time and DRS shows when it's open.</p>`);
+    ? `<p class="note">Live data from OpenF1, refreshing every 5s — order, gaps, tyres, speed and car positions. `
+      + `Tap any driver for live throttle, brake, gear and RPM. DRS lights up green when open.</p>`
+    : `<p class="note">No race is live now. The tower shows the last session's final classification; the track map, `
+      + `speeds and telemetry are sampled from a mid-race moment so the cars are spread and moving. `
+      + `Tap any driver for their throttle, brake, gear and RPM. During a live session everything updates in real time.</p>`);
   setStatus(isLive ? "Live timing — auto-refreshing every 5s." : "Showing the latest completed session (no race live now).", false);
   if (isLive) liveTimer = setInterval(refresh, 5000);
 }
