@@ -1069,8 +1069,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function ofJson(path, tries = 4) {
   for (let a = 0; ; a++) {
-    const res = await fetch(OF1 + path);
-    if (res.status === 429 && a < tries) { await sleep(700 * (a + 1)); continue; } // OpenF1 rate limit
+    let res;
+    try {
+      res = await fetch(OF1 + path);
+    } catch (e) { // connection-level failure (blip, throttle, CORS-less block) — retry, don't crash the refresh
+      if (a < tries) { await sleep(700 * (a + 1)); continue; }
+      throw new Error("OpenF1 unreachable");
+    }
+    if (res.status === 429 && a < tries) { await sleep(700 * (a + 1)); continue; } // rate limit
     if (res.status === 404) return []; // OpenF1 says 404 for a query that matched no rows
     if (!res.ok) throw new Error("OpenF1 " + res.status);
     return res.json();
@@ -1170,6 +1176,25 @@ function teleHTML(tm) {
     + `<span>Speed<b>${tm.speed} km/h</b></span></div></div>`;
 }
 
+// fetch location + car_data around a moment. When live, widen the window until we actually catch
+// the field — a real F1 feed is timestamped seconds-to-a-minute behind wall-clock, so a fixed
+// "last 8 seconds" window would come up empty. latestByDriver then picks each car's freshest sample.
+async function snapPair(k, at, isLive) {
+  const widths = isLive ? [30000, 90000, 180000] : [6000];
+  let locMap = new Map(), teleMap = new Map();
+  for (const w of widths) {
+    const from = new Date(at - w).toISOString(), to = new Date(at + 5000).toISOString();
+    const [loc, cars] = await pool([
+      () => ofJson(`/location?session_key=${k}&${GE}${from}&${LE}${to}`),
+      () => ofJson(`/car_data?session_key=${k}&${GE}${from}&${LE}${to}`),
+    ], 2);
+    locMap = latestByDriver(loc.filter(p => p.x || p.y), (a, b) => a.date > b.date);
+    teleMap = latestByDriver(cars, (a, b) => a.date > b.date);
+    if (locMap.size >= 15) break; // caught the field — stop widening
+  }
+  return { locMap, teleMap };
+}
+
 async function liveTiming() {
   const [sessions, drivers] = await Promise.all([
     ofJson("/sessions?session_key=latest"), ofJson("/drivers?session_key=latest"),
@@ -1193,8 +1218,8 @@ async function liveTiming() {
   const k = s.session_key;
   async function refresh() {
     try {
-      // wave 1: order, tyres, laps. When live, window laps; when past, take them all to find the true end.
-      const lapWin = new Date(Date.now() - 250000).toISOString();
+      // wave 1: order, tyres, laps. Live windows are wide so feed lag can't empty them.
+      const lapWin = new Date(Date.now() - 400000).toISOString();
       const [position, stints, laps] = await pool([
         () => ofJson(`/position?session_key=${k}`),
         () => ofJson(`/stints?session_key=${k}`),
@@ -1206,24 +1231,28 @@ async function liveTiming() {
       let towerAnchor = Date.now();
       const start = Date.parse(s.date_start);
       if (!isLive) { towerAnchor = 0; for (const l of laps) { const t = Date.parse(l.date_start) + (l.lap_duration || 0) * 1000; if (t > towerAnchor) towerAnchor = t; } }
-      const gapFrom = new Date(towerAnchor - (isLive ? 20000 : 130000)).toISOString();
-      // map + telemetry: live = now; finished = a mid-race green-flag moment so cars are spread and moving
+      // gaps: wide window tolerates feed lag; latestByDriver picks each car's freshest reading
+      const gapFrom = new Date(towerAnchor - (isLive ? 120000 : 130000)).toISOString();
+      const intervals = await ofJson(`/intervals?session_key=${k}&${GE}${gapFrom}`);
+
+      // map + telemetry: live = now (snapPair widens to catch a laggy feed); finished = a mid-race
+      // green-flag moment so cars are spread and moving
       const snapAt = isLive ? Date.now() : start + 0.55 * (towerAnchor - start);
-      const snapFrom = new Date(snapAt - (isLive ? 8000 : 4000)).toISOString(), snapTo = new Date(snapAt + 2000).toISOString();
+      const { locMap, teleMap } = await snapPair(k, snapAt, isLive);
 
-      // wave 2: gaps (final), car positions + telemetry (racing snapshot)
-      const [intervals, snap, cars] = await pool([
-        () => ofJson(`/intervals?session_key=${k}&${GE}${gapFrom}`),
-        () => ofJson(`/location?session_key=${k}&${GE}${snapFrom}&${LE}${snapTo}`),
-        () => ofJson(`/car_data?session_key=${k}&${GE}${snapFrom}&${LE}${snapTo}`),
-      ], 2);
+      renderTower(position, intervals, laps, stints, dinfo, teleMap);
+      paintTrack(locMap, dinfo);
 
-      const tele = latestByDriver(cars, (a, b) => a.date > b.date);
-      renderTower(position, intervals, laps, stints, dinfo, tele);
-      paintTrack(latestByDriver(snap.filter(p => p.x || p.y), (a, b) => a.date > b.date), dinfo);
+      // surface how far behind the live feed is, so lag is visible rather than mysterious
+      let lagTxt = "";
+      if (isLive) {
+        let newest = 0;
+        for (const p of locMap.values()) { const t = Date.parse(p.date); if (t > newest) newest = t; }
+        lagTxt = newest ? ` · feed ${Math.max(0, Math.round((Date.now() - newest) / 1000))}s behind` : " · waiting for feed";
+      }
       document.getElementById("lt-sub").textContent =
         (isLive ? "Updating live · " : "Final classification · ") + new Date(s.date_start).toDateString()
-        + " · refreshed " + new Date().toLocaleTimeString();
+        + " · refreshed " + new Date().toLocaleTimeString() + lagTxt;
     } catch (e) {
       const sub = document.getElementById("lt-sub");
       if (sub) sub.textContent = "Update failed: " + e.message;
