@@ -1196,9 +1196,21 @@ async function snapPair(k, at, isLive) {
 }
 
 async function liveTiming() {
-  const [sessions, drivers] = await Promise.all([
-    ofJson("/sessions?session_key=latest"), ofJson("/drivers?session_key=latest"),
-  ]);
+  out.innerHTML = `<div class="lt-head"><span class="lt-title">Live timing</span></div><p class="note">Connecting to OpenF1…</p>`;
+  let sessions, drivers;
+  try {
+    [sessions, drivers] = await Promise.all([
+      ofJson("/sessions?session_key=latest"), ofJson("/drivers?session_key=latest"),
+    ]);
+  } catch (e) {
+    // OpenF1-specific failure — keep it out of the generic "check your connection" handler
+    out.innerHTML = `<div class="lt-head"><span class="lt-title">Live timing</span></div>`
+      + `<p class="err">OpenF1 — the live-timing data source — is unreachable right now. This is almost `
+      + `always a temporary rate limit that clears within a few minutes, and it doesn't affect anything `
+      + `else in the app.</p>`
+      + `<button class="optimize" onclick="run(liveTiming, document.querySelectorAll('nav button')[0])">Retry</button>`;
+    return;
+  }
   const s = sessions[0];
   if (!s) { note("No session data available from OpenF1 right now."); return; }
   const dinfo = new Map(drivers.map(d => [d.driver_number, d]));
