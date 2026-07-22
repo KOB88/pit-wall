@@ -125,6 +125,12 @@
     background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
     font: inherit; width: 84px; padding: 4px 8px; border-radius: 4px; text-align: right;
   }
+  #importBox textarea {
+    width: 100%; min-height: 90px; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--text); font: 12px 'JetBrains Mono', monospace; padding: 8px; border-radius: 6px;
+    resize: vertical; margin: 6px 0;
+  }
+  #importBox textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -961,6 +967,11 @@ async function teamOptimizer() {
   title("Team optimizer · driver prices ($M)");
   note("Prefilled with estimates scaled from predicted points — overwrite with the real prices from the official "
     + "F1 Fantasy game when you have them. Edits are saved on this device.");
+  out.insertAdjacentHTML("beforeend",
+    `<button class="optimize" onclick="toggleImport()">Import real prices (paste JSON)</button>`
+    + `<div id="importBox" style="display:none">`
+    + `<textarea id="importJson" placeholder='Paste prices, e.g. {"drivers":{"Verstappen":28.5},"constructors":{"McLaren":24}}'></textarea>`
+    + `<button class="optimize" onclick="applyImport()">Apply prices</button><div id="importMsg"></div></div>`);
   const priceInput = (kind, name, pts, est, ceil = 0) => {
     const stored = localStorage.getItem(priceKey(kind, name));
     return `<div class="row"><span class="name">${kind === "d" ? dn(name) : name}`
@@ -978,6 +989,58 @@ async function teamOptimizer() {
     `<div class="row"><span class="name">Budget ($M)</span>`
     + `<input id="budget" type="number" min="0" step="0.5" value="${localStorage.getItem("pw-budget") ?? 100}"></div>`
     + `<button class="optimize" onclick="optimizeTeam()">Optimize · 5 drivers + 2 constructors</button><div id="optOut"></div>`);
+}
+
+function toggleImport() {
+  const b = document.getElementById("importBox");
+  b.style.display = b.style.display === "none" ? "block" : "none";
+}
+
+const normName = s => String(s).toLowerCase().replace(/[^a-z]/g, "");
+
+// pull (name, price) pairs out of whatever shape the paste is in
+function collectPrices(data) {
+  const pairs = [];
+  const addObj = o => { for (const [k, v] of Object.entries(o)) { const n = parseFloat(v); if (isFinite(n)) pairs.push([k, n]); } };
+  if (Array.isArray(data)) {
+    for (const it of data) {
+      const name = it.name ?? it.driver ?? it.constructor ?? it.team ?? it.player;
+      const price = parseFloat(it.price ?? it.cost ?? it.value);
+      if (name && isFinite(price)) pairs.push([name, price]);
+    }
+  } else if (data && typeof data === "object") {
+    if (data.drivers || data.constructors) { if (data.drivers) addObj(data.drivers); if (data.constructors) addObj(data.constructors); }
+    else addObj(data);
+  }
+  return pairs;
+}
+
+function applyImport() {
+  const msg = document.getElementById("importMsg");
+  let data;
+  try { data = JSON.parse(document.getElementById("importJson").value); }
+  catch { msg.innerHTML = `<p class="err">That isn't valid JSON — check for a stray comma or quote.</p>`; return; }
+  const pairs = collectPrices(data);
+  if (!pairs.length) { msg.innerHTML = `<p class="err">No name/price pairs found in that JSON.</p>`; return; }
+
+  const inputs = [...document.querySelectorAll("input.price")];
+  const usedPairs = new Set();
+  let matched = 0;
+  for (const inp of inputs) {
+    const app = normName(inp.dataset.name);
+    const hit = pairs.find(([n]) => { const x = normName(n); return x === app || x.includes(app) || app.includes(x); });
+    if (hit) {
+      inp.value = hit[1];
+      localStorage.setItem(priceKey(inp.dataset.kind, inp.dataset.name), hit[1]);
+      const tag = inp.closest(".row").querySelector(".detail");
+      if (tag) tag.textContent = tag.textContent.replace(" · price estimated", "");
+      usedPairs.add(hit[0]); matched++;
+    }
+  }
+  const leftovers = pairs.filter(([n]) => !usedPairs.has(n)).map(([n]) => n);
+  msg.innerHTML = `<p class="note">Filled ${matched} of ${inputs.length} prices from ${pairs.length} entries.`
+    + (leftovers.length ? ` Didn't match: ${leftovers.slice(0, 8).join(", ")}${leftovers.length > 8 ? "…" : ""}.` : "")
+    + ` Review the numbers, then hit Optimize.</p>`;
 }
 
 function combos(items, k, start, chosen, cb) {
