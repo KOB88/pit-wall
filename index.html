@@ -156,7 +156,7 @@
   .track .carnum { fill: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 600; font-size: 11px;
     text-anchor: middle; dominant-baseline: central; paint-order: stroke; stroke: #0a0a0f; stroke-width: 2.5; }
   .tt-row { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 4px; }
-  .tt-row summary { display: grid; grid-template-columns: 2ch 8px 1fr auto; align-items: center; gap: 8px;
+  .tt-row summary { display: grid; grid-template-columns: 2.6em 5px 24px 1fr auto; align-items: center; gap: 7px;
     padding: 7px 10px; cursor: pointer; list-style: none; }
   .tt-row summary::-webkit-details-marker { display: none; }
   .tt-row[open] { border-color: #3a3f4b; }
@@ -190,6 +190,37 @@
   .tyre.H { border-color: #e8eaee; color: #e8eaee; }
   .tyre.I { border-color: #4ade80; color: #4ade80; }
   .tyre.W { border-color: #4aa3ff; color: #4aa3ff; }
+  .tt-row .p { display: flex; align-items: baseline; gap: 3px; justify-content: flex-end; }
+  .tt-row .chg { font-size: 9px; font-weight: 700; }
+  .tt-row .chg.up { color: var(--up); }
+  .tt-row .chg.dn { color: var(--down); }
+  .tt-row .shot { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; background: var(--panel-2); }
+  .tt-row .shot.ph { display: inline-block; }
+  .tt-row .fl { color: #b388ff; font-size: 9px; font-weight: 700; margin-left: 4px; }
+  .lap.pb-sess { color: #b388ff; }   /* purple: session-fastest */
+  .lap.pb-self { color: var(--up); }  /* green: personal best */
+  .tele .secs { display: flex; gap: 8px; margin-bottom: 8px; }
+  .tele .sec { font-size: 11px; color: var(--dim); background: var(--panel-2); padding: 3px 7px; border-radius: 4px; }
+  .tele .sec.pb-sess { color: #b388ff; }
+  .tele .sec.pb-self { color: var(--up); }
+  .tele .stints { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .tele .st { font-size: 11px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--dim); }
+  .tele .st.S { border-color: #ff3b3b; color: #ff3b3b; }
+  .tele .st.M { border-color: #ffd24a; color: #ffd24a; }
+  .tele .st.H { border-color: #e8eaee; color: #e8eaee; }
+  .tele .st.I { border-color: #4ade80; color: #4ade80; }
+  .tele .team-hd { font-size: 11px; color: var(--dim); margin-bottom: 8px; }
+  #lt-rc { margin: 4px 0 8px; }
+  .rc-title { font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); margin-bottom: 4px; }
+  .rc-msg { display: flex; align-items: baseline; gap: 8px; font-size: 12px; padding: 4px 8px;
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 4px; margin-bottom: 3px; }
+  .rc-msg.yellow { border-left-color: #ffd24a; }
+  .rc-msg.red { border-left-color: #ff3b3b; }
+  .rc-msg.green { border-left-color: #4ade80; }
+  .rc-msg.sc { border-left-color: #ff8a00; }
+  .rc-msg.chq { border-left-color: #e8eaee; }
+  .rc-lap { color: var(--dim); min-width: 3ch; font-size: 11px; }
 
   @media (prefers-reduced-motion: no-preference) {
     .blink { animation: pulse 1s ease-in-out infinite; }
@@ -1241,30 +1272,74 @@ function paintTrack(carLatest, dinfo) {
   svg.innerHTML = `<path class="outline" d="${d}"/>${dots}`;
 }
 
-function renderTower(position, intervals, laps, stints, dinfo, tele) {
+function renderTower(position, intervals, laps, stints, dinfo, tele, isLive) {
   const pos = latestByDriver(position, (a, b) => a.date > b.date);
   const intv = latestByDriver(intervals, (a, b) => a.date > b.date);
   const lap = latestByDriver(laps, (a, b) => a.lap_number > b.lap_number);
   const stint = latestByDriver(stints, (a, b) => a.lap_start > b.lap_start);
+
+  // starting position (earliest record per driver) for the gained/lost arrows
+  const startPos = new Map();
+  for (const p of position) { const c = startPos.get(p.driver_number); if (!c || p.date < c.date) startPos.set(p.driver_number, p); }
+
+  // fastest lap, per-driver best lap, and session/personal best sectors (purple/green)
+  let fastest = null;
+  const bestLap = new Map(), bestSec = [new Map(), new Map(), new Map()], sessSec = [Infinity, Infinity, Infinity];
+  for (const l of laps) {
+    const d = l.driver_number;
+    if (l.lap_duration > 0) {
+      if (!fastest || l.lap_duration < fastest.lap_duration) fastest = l;
+      const b = bestLap.get(d); if (!b || l.lap_duration < b.lap_duration) bestLap.set(d, l); // fastest lap OBJECT
+    }
+    [l.duration_sector_1, l.duration_sector_2, l.duration_sector_3].forEach((s, i) => {
+      if (s > 0) { if (!bestSec[i].has(d) || s < bestSec[i].get(d)) bestSec[i].set(d, s); if (s < sessSec[i]) sessSec[i] = s; }
+    });
+  }
+  const fastestNum = fastest?.driver_number;
+
+  // tyre-stint history per driver
+  const stintHist = new Map();
+  for (const s of [...stints].sort((a, b) => a.lap_start - b.lap_start)) {
+    if (!stintHist.has(s.driver_number)) stintHist.set(s.driver_number, []);
+    stintHist.get(s.driver_number).push(s);
+  }
+
   const order = [...pos.values()].sort((a, b) => a.position - b.position);
   let html = "";
   for (const p of order) {
     const num = p.driver_number, info = dinfo.get(num) || {};
     const col = info.team_colour ? "#" + info.team_colour : "#666";
     const gap = p.position === 1 ? "LEADER" : fmtGap(intv.get(num)?.gap_to_leader);
-    const ll = lap.get(num)?.lap_duration, tl = TYRE_LETTER[stint.get(num)?.compound] || "";
+    const tl = TYRE_LETTER[stint.get(num)?.compound] || "";
+    // live: the driver's latest lap (purple if session-best, green if a personal best).
+    // finished replay: the driver's fastest lap (session-fastest shown purple) — cooldown laps aren't useful.
+    const shownLap = isLive ? lap.get(num) : bestLap.get(num), ll = shownLap?.lap_duration;
     const tm = tele && tele.get(num), spd = tm?.speed;
     const drsOpen = tm && tm.drs != null && tm.drs >= 10; // OpenF1: 10/12/14 = DRS active
+    const sp = startPos.get(num)?.position, delta = sp != null ? sp - p.position : 0;
+    const arrow = delta > 0 ? `<span class="chg up">▲${delta}</span>`
+      : delta < 0 ? `<span class="chg dn">▼${-delta}</span>` : "";
+    let lapCls = "";
+    if (ll != null) {
+      if (num === fastestNum && ll === fastest.lap_duration) lapCls = "pb-sess";
+      else if (isLive && ll === bestLap.get(num)?.lap_duration) lapCls = "pb-self";
+    }
+    const shot = info.headshot_url
+      ? `<img class="shot" src="${info.headshot_url}" alt="" loading="lazy">`
+      : `<span class="shot ph" style="background:${col}"></span>`;
+    const fl = num === fastestNum ? `<span class="fl" title="Fastest lap">FL</span>` : "";
     html += `<details class="tt-row" data-num="${num}"${ltOpen.has(num) ? " open" : ""}><summary>`
-      + `<span class="p">${p.position}</span>`
+      + `<span class="p">${p.position}${arrow}</span>`
       + `<span class="bar" style="background:${col}"></span>`
-      + `<span class="who"><span class="acr">${info.name_acronym || num}</span>`
-      + `<span class="team">${info.team_name || ""}</span></span>`
+      + shot
+      + `<span class="who"><span class="acr">${info.name_acronym || num}${fl}</span></span>`
       + `<span class="data">${tl ? `<span class="tyre ${tl}">${tl}</span>` : ""}`
       + `${drsOpen ? `<span class="drs">DRS</span>` : ""}`
       + `<span class="spd">${spd != null ? spd + `<i>km/h</i>` : ""}</span>`
-      + `<span class="lap">${ll ? fmtLap(ll) : "—"}</span>`
-      + `<span class="gap">${gap}</span></span></summary>${teleHTML(tm)}</details>`;
+      + `<span class="lap ${lapCls}">${ll ? fmtLap(ll) : "—"}</span>`
+      + `<span class="gap">${gap}</span></span></summary>`
+      + teleHTML(tm, shownLap, bestSec, sessSec, num, stintHist.get(num), info.team_name)
+      + `</details>`;
   }
   const tower = document.getElementById("lt-tower");
   tower.innerHTML = html;
@@ -1273,15 +1348,50 @@ function renderTower(position, intervals, laps, stints, dinfo, tele) {
     d.addEventListener("toggle", () => { d.open ? ltOpen.add(+d.dataset.num) : ltOpen.delete(+d.dataset.num); }));
 }
 
-function teleHTML(tm) {
-  if (!tm || tm.speed == null) return `<div class="tele"><span class="na">No telemetry for this driver right now.</span></div>`;
-  const thr = Math.max(0, Math.min(100, tm.throttle ?? 0));
-  const brk = Math.max(0, Math.min(100, tm.brake ?? 0));
-  return `<div class="tele">`
-    + `<div class="ch"><span class="lbl">Throttle</span><span class="bar2"><span class="fill thr" style="width:${thr}%"></span></span><span class="v">${thr}%</span></div>`
-    + `<div class="ch"><span class="lbl">Brake</span><span class="bar2"><span class="fill brk" style="width:${brk}%"></span></span><span class="v">${brk}%</span></div>`
-    + `<div class="nums"><span>Gear<b>${tm.n_gear ?? "—"}</b></span><span>RPM<b>${tm.rpm != null ? tm.rpm.toLocaleString() : "—"}</b></span>`
-    + `<span>Speed<b>${tm.speed} km/h</b></span></div></div>`;
+function teleHTML(tm, lapObj, bestSec, sessSec, num, stints, team) {
+  let secs = "";
+  if (lapObj) {
+    const cells = [lapObj.duration_sector_1, lapObj.duration_sector_2, lapObj.duration_sector_3].map((s, i) => {
+      if (!(s > 0)) return `<span class="sec">S${i + 1} —</span>`;
+      const cls = s <= (sessSec?.[i] ?? Infinity) + 1e-6 ? "pb-sess"
+        : s <= (bestSec?.[i]?.get(num) ?? Infinity) + 1e-6 ? "pb-self" : "";
+      return `<span class="sec ${cls}">S${i + 1} ${s.toFixed(1)}</span>`;
+    });
+    secs = `<div class="secs">${cells.join("")}</div>`;
+  }
+  let st = "";
+  if (stints && stints.length)
+    st = `<div class="stints">${stints.map(s => `<span class="st ${TYRE_LETTER[s.compound] || ""}">`
+      + `${TYRE_LETTER[s.compound] || "?"} ${s.lap_start}–${s.lap_end}</span>`).join("")}</div>`;
+  let tel = "";
+  if (tm && tm.speed != null) {
+    const thr = Math.max(0, Math.min(100, tm.throttle ?? 0)), brk = Math.max(0, Math.min(100, tm.brake ?? 0));
+    tel = `<div class="ch"><span class="lbl">Throttle</span><span class="bar2"><span class="fill thr" style="width:${thr}%"></span></span><span class="v">${thr}%</span></div>`
+      + `<div class="ch"><span class="lbl">Brake</span><span class="bar2"><span class="fill brk" style="width:${brk}%"></span></span><span class="v">${brk}%</span></div>`
+      + `<div class="nums"><span>Gear<b>${tm.n_gear ?? "—"}</b></span><span>RPM<b>${tm.rpm != null ? tm.rpm.toLocaleString() : "—"}</b></span>`
+      + `<span>Speed<b>${tm.speed} km/h</b></span></div>`;
+  }
+  const head = team ? `<div class="team-hd">${team}</div>` : "";
+  if (!secs && !st && !tel) return `<div class="tele">${head}<span class="na">No live data for this driver.</span></div>`;
+  return `<div class="tele">${head}${secs}${st}${tel}</div>`;
+}
+
+function renderRaceControl(rc) {
+  const el = document.getElementById("lt-rc");
+  if (!el) return;
+  const keep = (rc || []).filter(r => ["Flag", "SafetyCar", "SessionStatus"].includes(r.category)
+    || /PENALTY|INVESTIGAT|DELETED|NOTED/i.test(r.message || ""));
+  const recent = keep.slice(-6).reverse();
+  const cls = r => r.category === "SafetyCar" ? "sc"
+    : r.flag === "CHEQUERED" ? "chq"
+    : /YELLOW/.test(r.flag || "") ? "yellow"
+    : r.flag === "RED" ? "red"
+    : /GREEN|CLEAR/.test(r.flag || "") ? "green" : "";
+  el.innerHTML = `<div class="rc-title">Race control</div>`
+    + (recent.length
+      ? recent.map(r => `<div class="rc-msg ${cls(r)}"><span class="rc-lap">L${r.lap_number ?? "–"}</span>`
+        + `<span>${r.message || r.flag || r.category}</span></div>`).join("")
+      : `<div class="rc-msg"><span>No race control messages yet.</span></div>`);
 }
 
 // fetch location + car_data around a moment. When live, widen the window until we actually catch
@@ -1329,6 +1439,7 @@ async function liveTiming() {
     + `<span class="lt-badge ${isLive ? "live" : "past"}">${isLive ? "● LIVE" : "Latest session"}</span>`
     + `<span class="lt-sub" id="lt-sub">Loading…</span></div>`
     + `<svg class="track" id="lt-track" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid meet"></svg>`
+    + `<div id="lt-rc"></div>`
     + `<div id="lt-tower"></div>`;
 
   if (ltKey !== s.session_key) { // the map is a bonus — never let it block the timing tower
@@ -1340,11 +1451,13 @@ async function liveTiming() {
     try {
       // wave 1: order, tyres, laps. Live windows are wide so feed lag can't empty them.
       const lapWin = new Date(Date.now() - 400000).toISOString();
-      const [position, stints, laps] = await pool([
+      const [position, stints, laps, rc] = await pool([
         () => ofJson(`/position?session_key=${k}`),
         () => ofJson(`/stints?session_key=${k}`),
         () => ofJson(`/laps?session_key=${k}` + (isLive ? `&date_start%3E=${lapWin}` : "")),
+        () => ofJson(`/race_control?session_key=${k}`),
       ], 2);
+      renderRaceControl(rc);
 
       // the tower is anchored to the end of running — a finished session's date_end is padded,
       // so find when cars actually last ran from the lap timestamps
@@ -1360,7 +1473,7 @@ async function liveTiming() {
       const snapAt = isLive ? Date.now() : start + 0.55 * (towerAnchor - start);
       const { locMap, teleMap } = await snapPair(k, snapAt, isLive);
 
-      renderTower(position, intervals, laps, stints, dinfo, teleMap);
+      renderTower(position, intervals, laps, stints, dinfo, teleMap, isLive);
       paintTrack(locMap, dinfo);
 
       // surface how far behind the live feed is, so lag is visible rather than mysterious
@@ -1381,11 +1494,13 @@ async function liveTiming() {
 
   await refresh();
   out.insertAdjacentHTML("beforeend", isLive
-    ? `<p class="note">Live data from OpenF1, refreshing every 5s — order, gaps, tyres, speed and car positions. `
-      + `Tap any driver for live throttle, brake, gear and RPM. DRS lights up green when open.</p>`
-    : `<p class="note">No race is live now. The tower shows the last session's final classification; the track map, `
-      + `speeds and telemetry are sampled from a mid-race moment so the cars are spread and moving. `
-      + `Tap any driver for their throttle, brake, gear and RPM. During a live session everything updates in real time.</p>`);
+    ? `<p class="note">Live from OpenF1, refreshing every 5s — track positions, order, gaps, tyres, speed, `
+      + `race control, places gained/lost (▲▼) and the fastest lap (FL, purple). Purple lap = session best, `
+      + `green = personal best. Tap any driver for sectors, tyre stints and live throttle/brake/gear/RPM.</p>`
+    : `<p class="note">No race is live now — this replays the last session. Tower shows final classification with `
+      + `places gained/lost (▲▼) and the fastest lap (FL); purple lap = session best, green = personal best. `
+      + `Track map, speeds and telemetry are sampled from a mid-race moment. Tap any driver for sectors, tyre `
+      + `stints and throttle/brake/gear/RPM. Everything updates live during a real session.</p>`);
   setStatus(isLive ? "Live timing — auto-refreshing every 5s." : "Showing the latest completed session (no race live now).", false);
   if (isLive) liveTimer = setInterval(refresh, 5000);
 }
