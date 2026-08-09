@@ -247,7 +247,13 @@ async function fetchCached(url, emptyOn404) {
   } catch {}
   let res;
   for (let attempt = 0; ; attempt++) {
-    res = await fetch(url);
+    try {
+      res = await fetch(url);
+    } catch (e) {
+      if (attempt >= 3) throw e; // network blip — retry a few times before giving up
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      continue;
+    }
     if (res.status !== 429 || attempt >= 3) break;
     await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); // rate-limited — back off
   }
@@ -514,7 +520,7 @@ async function overtakes() {
 // ---------- prediction model (fantasy points) ----------
 // qualiPts = fantasy pts per 1% gap-to-pole improvement; mechW = how fully a mechanical
 // DNF counts against future reliability (1 = same as a crash, 0.5 = "the team will fix it")
-const DEFAULT_TUNE = { decay: 0.85, shrinkK: 3, qualiPts: 2, mechW: 1 };
+const DEFAULT_TUNE = { decay: 0.85, shrinkK: 3, qualiPts: 2, mechW: 1, gridW: 0.4 };
 function tuneParams() {
   try { return { ...DEFAULT_TUNE, ...JSON.parse(localStorage.getItem("pw-tune") ?? "{}") }; }
   catch { return { ...DEFAULT_TUNE }; }
@@ -569,6 +575,7 @@ function buildDriverData(allResults, allSprints, allQuali, upto) {
         finished: isFinished(res.status),
         crash: !isFinished(res.status) && CRASH_STATUS.has(res.status),
         qgap: qualiGap.get(n) ?? null,
+        grid, // starting position — the strongest single predictor of a race's fantasy points
         rteam: res.Constructor.name,
       });
     }
@@ -576,9 +583,25 @@ function buildDriverData(allResults, allSprints, allQuali, upto) {
   return drivers;
 }
 
-function predictDrivers(drivers, opts) {
-  const { decay, shrinkK, qualiPts, mechW } = { ...tuneParams(), ...opts };
+function predictDrivers(drivers, opts, gridMap) {
+  const { decay, shrinkK, qualiPts, mechW, gridW } = { ...tuneParams(), ...opts };
   const preds = new Map();
+
+  // grid -> expected fantasy points curve, learned from the training rounds.
+  // Only used when we know the upcoming grid (gridMap) — grid position is the single
+  // strongest predictor of a race's points, so we blend it into each driver's form.
+  let curve = null;
+  if (gridW > 0 && gridMap) {
+    const byGrid = new Map(); let all = 0, allN = 0;
+    for (const d of drivers.values()) for (const rd of d.rounds) {
+      if (rd.grid == null) continue;
+      (byGrid.get(rd.grid) || byGrid.set(rd.grid, []).get(rd.grid)).push(rd.fpts);
+      all += rd.fpts; allN++;
+    }
+    const avg = allN ? all / allN : 0;
+    curve = g => { const a = byGrid.get(g); return a && a.length >= 2 ? a.reduce((x, y) => x + y, 0) / a.length : avg; };
+  }
+
   for (const [name, d] of drivers) {
     // pace: recency-weighted fantasy points, DNF rounds excluded (a blown engine isn't slow pace)
     let wSum = 0, pSum = 0, fin = 0, crash = 0, mech = 0;
@@ -610,11 +633,16 @@ function predictDrivers(drivers, opts) {
   // the driver; how much a mechanical DNF predicts future ones is tuned (mechW).
   const vals = [...preds.values()];
   const fieldAvg = vals.reduce((a, p) => a + p.ewma, 0) / (vals.length || 1);
-  for (const p of vals) {
+  for (const [name, p] of preds) {
     const w = p.fin / (p.fin + shrinkK);
     p.pace = w * p.ewma + (1 - w) * fieldAvg;
     p.reliability = p.n ? Math.max(0, 1 - (p.crash + mechW * p.mech) / p.n) : 0;
     p.pred = p.reliability * (p.pace + qualiPts * p.qualiTrend) + (1 - p.reliability) * -20;
+    // blend in the grid-implied points when we know where the driver starts
+    if (curve && gridMap && gridMap.has(name)) {
+      p.gridPts = curve(gridMap.get(name));
+      p.pred = (1 - gridW) * p.pred + gridW * p.gridPts;
+    }
     p.norm = p.pred;
   }
   return preds;
@@ -803,7 +831,15 @@ async function raceForecast() {
 
   const { allResults, allSprints, allQuali } = await loadModelData(last);
   const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, last), allResults[last - 1]);
-  const preds = predictDrivers(drivers);
+  // once the next race has qualified, fold each driver's grid slot into the prediction
+  let upGrid = new Map();
+  try {
+    const q = await fetchCached(`${API}/current/${next.round}/qualifying.json?limit=40`);
+    for (const r of q.MRData.RaceTable.Races[0]?.QualifyingResults ?? [])
+      upGrid.set(r.Driver.familyName, parseInt(r.position, 10) || 25);
+  } catch {}
+  const gridKnown = upGrid.size > 0;
+  const preds = predictDrivers(drivers, {}, gridKnown ? upGrid : undefined);
   const wetRounds = await loadWetRounds(last);
   const wetSkill = wetSkillDeltas(drivers, wetRounds, last);
 
@@ -832,11 +868,13 @@ async function raceForecast() {
   }
   rows.sort((a, b) => b.pts - a.pts);
 
-  title(`Forecast · fantasy pts · ${countryFlag(next.Circuit.Location.country)}${next.raceName} · ${next.date}${next.Sprint ? " · sprint weekend" : ""}`);
+  title(`Forecast · fantasy pts · ${countryFlag(next.Circuit.Location.country)}${next.raceName} · ${next.date}`
+    + `${gridKnown ? " · grid known" : ""}${next.Sprint ? " · sprint weekend" : ""}`);
   rows.slice(0, 10).forEach((r, i) =>
     rowHTML(i + 1, dn(r.name), r.pts.toFixed(1) + " pts", "",
-      (r.tr ? `here: ${r.tr.wins}W/${r.tr.podiums}P in ${r.tr.races}, avg ${Math.round(r.tr.avg)} pts · `
-            : "first time at this track · ")
+      (gridKnown && upGrid.has(r.name) ? `starts P${upGrid.get(r.name)} · ` : "")
+      + (r.tr ? `here: ${r.tr.wins}W/${r.tr.podiums}P in ${r.tr.races}, avg ${Math.round(r.tr.avg)} pts · `
+            : "first time here · ")
       + (r.ws != null ? `wet skill ${r.ws >= 0 ? "+" : ""}${r.ws.toFixed(1)} · ` : "")
       + (w0?.rain != null ? `rain risk ${w0.rain}%` : "no forecast yet")));
 
@@ -854,7 +892,10 @@ async function raceForecast() {
       ? `Wet rounds so far: ${[...wetRounds].sort((a, b) => a - b).map(r => "R" + r).join(", ")} (OpenF1 rainfall data) — wet skill is each driver's wet-vs-dry points delta, shrunk by sample size. `
       : "No wet races detected this season (OpenF1) — rain adjustment is field compression only. ")
     + `Track record blends up to ${TRACK_WEIGHT * 100}% of a driver's last-${HISTORY_YEARS}-seasons form here, `
-    + "weighted toward recent years and by how often they've raced the track. Weather forecasts only reach ~16 days out.");
+    + "weighted toward recent years and by how often they've raced the track. "
+    + (gridKnown ? "Qualifying is in, so each driver's actual grid slot is folded into the prediction — the strongest signal available. "
+                 : "Once qualifying runs, each driver's grid slot gets folded in (the strongest signal). ")
+    + "Weather forecasts only reach ~16 days out.");
 }
 
 // ---------- Analysis 8: walk-forward backtest + auto-tune ----------
@@ -872,7 +913,10 @@ function walkForward(allResults, allSprints, allQuali, last, opts) {
   let n = 0;
   for (let k = 5; k <= last; k++) {
     const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, k - 1), allResults[k - 2]);
-    const model = predictDrivers(drivers, opts);
+    // round k's actual starting grid is known before the race, so it's fair to predict with it
+    const gridMap = new Map();
+    for (const res of allResults[k - 1]) gridMap.set(res.Driver.familyName, parseInt(res.grid, 10) || 25);
+    const model = predictDrivers(drivers, opts, gridMap);
     const roundErr = { "Season average": 0, "Last-4 average": 0, "Full model": 0 };
     let rn = 0;
     for (const res of allResults[k - 1]) {
@@ -919,25 +963,26 @@ async function backtest() {
 
 async function tuneModel() {
   const tuneOut = document.getElementById("tuneOut");
-  tuneOut.innerHTML = `<p class="note">Searching 45 combinations…</p>`;
+  tuneOut.innerHTML = `<p class="note">Searching combinations…</p>`;
   const last = await getLatestRound();
   const { allResults, allSprints, allQuali } = await loadModelData(last);
   const results = [];
-  for (const decay of [0.7, 0.8, 0.85, 0.9, 1])
+  for (const decay of [0.8, 0.9, 1])
     for (const shrinkK of [1, 3, 5])
       for (const qualiPts of [0, 2, 4])
-        for (const mechW of [0.5, 0.75, 1]) {
-          const { err } = walkForward(allResults, allSprints, allQuali, last, { decay, shrinkK, qualiPts, mechW });
-          results.push({ decay, shrinkK, qualiPts, mechW, mae: err["Full model"] });
-        }
+        for (const mechW of [0.5, 1])
+          for (const gridW of [0, 0.3, 0.5, 0.7]) {
+            const { err } = walkForward(allResults, allSprints, allQuali, last, { decay, shrinkK, qualiPts, mechW, gridW });
+            results.push({ decay, shrinkK, qualiPts, mechW, gridW, mae: err["Full model"] });
+          }
   results.sort((a, b) => a.mae - b.mae);
   const best = results[0];
   localStorage.setItem("pw-tune", JSON.stringify({
-    decay: best.decay, shrinkK: best.shrinkK, qualiPts: best.qualiPts, mechW: best.mechW,
+    decay: best.decay, shrinkK: best.shrinkK, qualiPts: best.qualiPts, mechW: best.mechW, gridW: best.gridW,
   }));
   tuneOut.innerHTML = `<div class="section-title">Tuned · best of ${results.length} combos</div>`
     + results.slice(0, 5).map((r, i) =>
-      `<div class="row"><span class="pos">${i + 1}</span><span class="name">λ=${r.decay} · k=${r.shrinkK} · quali ${r.qualiPts} · mech ${r.mechW}</span>`
+      `<div class="row"><span class="pos">${i + 1}</span><span class="name">λ=${r.decay} · k=${r.shrinkK} · quali ${r.qualiPts} · mech ${r.mechW} · grid ${r.gridW}</span>`
       + `<span class="val ${i === 0 ? "up" : ""}">${r.mae.toFixed(2)} MAE</span></div>`).join("")
     + `<p class="note">Best combo saved — the Form predictor, Race forecast and Team optimizer now use it. `
     + `Tuned on only ${last - 4} test rounds, so expect modest gains; re-tune after each race.</p>`;
