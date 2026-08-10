@@ -132,6 +132,7 @@
     resize: vertical; margin: 6px 0;
   }
   #importBox textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input.own { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; flex: none; cursor: pointer; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -222,6 +223,12 @@
   .rc-msg.sc { border-left-color: #ff8a00; }
   .rc-msg.chq { border-left-color: #6b6b76; }
   .rc-lap { color: var(--dim); min-width: 3ch; font-size: 11px; }
+  .lt-token { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  .lt-token input { flex: 1; min-width: 160px; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--text); font: inherit; padding: 6px 10px; border-radius: 6px; }
+  .lt-token input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .lt-token button { width: auto; margin: 0; padding: 7px 14px; }
+  .lt-token .note { flex-basis: 100%; margin: 0; }
 
   @media (prefers-reduced-motion: no-preference) {
     .blink { animation: pulse 1s ease-in-out infinite; }
@@ -1051,7 +1058,9 @@ async function teamOptimizer() {
     + `<button class="optimize" onclick="applyImport()">Apply prices</button><div id="importMsg"></div></div>`);
   const priceInput = (kind, name, pts, est, ceil = 0) => {
     const stored = localStorage.getItem(priceKey(kind, name));
-    return `<div class="row"><span class="name">${kind === "d" ? dn(name) : name}`
+    const owned = localStorage.getItem(`pw-own:${kind}:${name}`) === "1" ? " checked" : "";
+    return `<div class="row"><input type="checkbox" class="own" title="I own this" data-kind="${kind}" data-name="${name}"${owned} onchange="toggleOwn(this)">`
+      + `<span class="name">${kind === "d" ? dn(name) : name}`
       + `<span class="detail">predicted ${pts.toFixed(1)} pts${stored == null ? " · price estimated" : ""}</span></span>`
       + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" data-ceil="${ceil.toFixed(1)}" type="number" `
       + `min="0" step="0.1" placeholder="$M" value="${stored ?? est.toFixed(1)}"></div>`;
@@ -1066,6 +1075,79 @@ async function teamOptimizer() {
     `<div class="row"><span class="name">Budget ($M)</span>`
     + `<input id="budget" type="number" min="0" step="0.5" value="${localStorage.getItem("pw-budget") ?? 100}"></div>`
     + `<button class="optimize" onclick="optimizeTeam()">Optimize · 5 drivers + 2 constructors</button><div id="optOut"></div>`);
+  out.insertAdjacentHTML("beforeend",
+    `<div class="section-title">Transfer planner</div>`
+    + `<p class="note">Already have a team? Tick the 5 drivers + 2 constructors you own (checkboxes above), set your `
+    + `free transfers, and I'll find the best swaps for the next race — netting the points hit for extra transfers.</p>`
+    + `<div class="row"><span class="name">Free transfers</span>`
+    + `<input id="freeTf" type="number" min="0" max="10" step="1" value="${localStorage.getItem("pw-freetf") ?? 2}"></div>`
+    + `<div class="row"><span class="name">Points hit per extra transfer</span>`
+    + `<input id="tfHit" type="number" min="0" step="1" value="${localStorage.getItem("pw-tfhit") ?? 10}"></div>`
+    + `<button class="optimize" onclick="planTransfers()">Plan transfers</button><div id="tfOut"></div>`);
+}
+
+function toggleOwn(el) {
+  const k = `pw-own:${el.dataset.kind}:${el.dataset.name}`;
+  el.checked ? localStorage.setItem(k, "1") : localStorage.removeItem(k);
+}
+
+function planTransfers() {
+  const owned = { d: [], c: [] }, avail = { d: [], c: [] };
+  document.querySelectorAll("input.price").forEach(inp => {
+    const price = parseFloat(inp.value);
+    if (!(price > 0)) return;
+    const kind = inp.dataset.kind;
+    const item = { name: inp.dataset.name, price, pts: parseFloat(inp.dataset.pts), kind };
+    const isOwn = localStorage.getItem(`pw-own:${kind}:${inp.dataset.name}`) === "1";
+    (isOwn ? owned : avail)[kind].push(item);
+  });
+  const F = parseInt(document.getElementById("freeTf").value) || 0;
+  const P = parseFloat(document.getElementById("tfHit").value) || 0;
+  const budget = parseFloat(document.getElementById("budget").value) || 100;
+  localStorage.setItem("pw-freetf", F); localStorage.setItem("pw-tfhit", P);
+  const tfOut = document.getElementById("tfOut");
+  if (owned.d.length !== 5 || owned.c.length !== 2) {
+    tfOut.innerHTML = `<p class="err">Tick exactly 5 drivers and 2 constructors you own — currently `
+      + `${owned.d.length} driver${owned.d.length === 1 ? "" : "s"} and ${owned.c.length} constructor${owned.c.length === 1 ? "" : "s"}.</p>`;
+    return;
+  }
+  const curPrice = [...owned.d, ...owned.c].reduce((a, x) => a + x.price, 0);
+
+  // every single swap (sell an owned player, buy an available one of the same kind)
+  const moves = [];
+  for (const kind of ["d", "c"]) for (const out of owned[kind]) for (const inc of avail[kind])
+    moves.push({ kind, out, inc, dp: inc.pts - out.pts, dc: inc.price - out.price });
+
+  const maxSwaps = Math.min(3, Math.max(F + 1, 2)); // let it suggest one hit beyond the free allowance
+  const results = [];
+  const conflict = (a, b) => a.out === b.out || a.inc === b.inc; // same slot sold twice / same buy twice
+  (function search(start, chosen) {
+    if (chosen.length) {
+      const newPrice = curPrice + chosen.reduce((a, m) => a + m.dc, 0);
+      if (newPrice <= budget) {
+        const gain = chosen.reduce((a, m) => a + m.dp, 0);
+        results.push({ chosen: [...chosen], net: gain - Math.max(0, chosen.length - F) * P, nSwaps: chosen.length, newPrice });
+      }
+    }
+    if (chosen.length >= maxSwaps) return;
+    for (let i = start; i < moves.length; i++) {
+      if (chosen.some(c => conflict(c, moves[i]))) continue;
+      chosen.push(moves[i]); search(i + 1, chosen); chosen.pop();
+    }
+  })(0, []);
+
+  results.sort((a, b) => b.net - a.net);
+  const top = results.filter(r => r.net > 0.05).slice(0, 5);
+  tfOut.innerHTML = top.length
+    ? `<div class="section-title">Best transfers · next race</div>` + top.map(r => {
+        const swaps = r.chosen.map(m => `${m.kind === "d" ? dn(m.out.name) : m.out.name} → ${m.kind === "d" ? dn(m.inc.name) : m.inc.name}`).join("; ");
+        const hit = Math.max(0, r.nSwaps - F) * P;
+        return `<div class="row"><span class="name">${swaps}<span class="detail">${r.nSwaps} transfer${r.nSwaps > 1 ? "s" : ""}`
+          + `${hit ? ` · −${hit} hit` : ""} · new spend $${r.newPrice.toFixed(1)}M</span></span>`
+          + `<span class="val up">+${r.net.toFixed(1)} pts</span></div>`;
+      }).join("")
+      + `<p class="note">Net gain = extra predicted points minus any transfer hit. Plain predicted points (captain/DRS-boost is a separate lever above).</p>`
+    : `<p class="note">No swap beats the points hit — your squad's in good shape, so bank the transfer.</p>`;
 }
 
 function toggleImport() {
@@ -1208,10 +1290,13 @@ const TYRE_LETTER = { SOFT: "S", MEDIUM: "M", HARD: "H", INTERMEDIATE: "I", WET:
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function ofJson(path, tries = 4) {
+  // optional user OpenF1 token (stored on-device only) raises the rate limit for a full race
+  const tok = localStorage.getItem("pw-of1-token");
+  const opts = tok ? { headers: { Authorization: "Bearer " + tok } } : undefined;
   for (let a = 0; ; a++) {
     let res;
     try {
-      res = await fetch(OF1 + path);
+      res = await fetch(OF1 + path, opts);
     } catch (e) { // connection-level failure (blip, throttle, CORS-less block) — retry, don't crash the refresh
       if (a < tries) { await sleep(700 * (a + 1)); continue; }
       throw new Error("OpenF1 unreachable");
@@ -1414,6 +1499,13 @@ async function snapPair(k, at, isLive) {
   return { locMap, teleMap };
 }
 
+function saveOf1Token() {
+  const v = document.getElementById("of1tok").value.trim();
+  if (v) localStorage.setItem("pw-of1-token", v); else localStorage.removeItem("pw-of1-token");
+  document.getElementById("of1tok").blur();
+  setStatus(v ? "OpenF1 token saved on this device — live timing will use it." : "OpenF1 token cleared.", false);
+}
+
 async function liveTiming() {
   out.innerHTML = `<div class="lt-head"><span class="lt-title">Live timing</span></div><p class="note">Connecting to OpenF1…</p>`;
   let sessions, drivers;
@@ -1495,15 +1587,20 @@ async function liveTiming() {
 
   await refresh();
   out.insertAdjacentHTML("beforeend", isLive
-    ? `<p class="note">Live from OpenF1, refreshing every 5s — track positions, order, gaps, tyres, speed, `
+    ? `<p class="note">Live from OpenF1, refreshing every 8s — track positions, order, gaps, tyres, speed, `
       + `race control, places gained/lost (▲▼) and the fastest lap (FL, purple). Purple lap = session best, `
       + `green = personal best. Tap any driver for sectors, tyre stints and live throttle/brake/gear/RPM.</p>`
     : `<p class="note">No race is live now — this replays the last session. Tower shows final classification with `
       + `places gained/lost (▲▼) and the fastest lap (FL); purple lap = session best, green = personal best. `
       + `Track map, speeds and telemetry are sampled from a mid-race moment. Tap any driver for sectors, tyre `
       + `stints and throttle/brake/gear/RPM. Everything updates live during a real session.</p>`);
-  setStatus(isLive ? "Live timing — auto-refreshing every 5s." : "Showing the latest completed session (no race live now).", false);
-  if (isLive) liveTimer = setInterval(refresh, 5000);
+  out.insertAdjacentHTML("beforeend",
+    `<div class="lt-token"><input id="of1tok" type="password" placeholder="OpenF1 API token (optional)" `
+    + `value="${localStorage.getItem("pw-of1-token") ?? ""}"><button class="optimize" onclick="saveOf1Token()">Save token</button>`
+    + `<div class="note">A free OpenF1 account gives a much higher rate limit — paste your token to keep live timing `
+    + `reliable through a full 2-hour race (5s polling can otherwise hit the anonymous limit). Stored only on this device, never sent anywhere but OpenF1.</div></div>`);
+  setStatus(isLive ? "Live timing — auto-refreshing every 8s." : "Showing the latest completed session (no race live now).", false);
+  if (isLive) liveTimer = setInterval(refresh, 8000);
 }
 
 setStatus("Pick an analysis to begin.", false);
