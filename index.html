@@ -142,6 +142,10 @@
   .dash-hero .dh-when { color: var(--dim); font-size: 13px; }
   .dash-hero .dh-when b { color: var(--text); }
   .dash-hero button { margin: 12px 0 0; }
+  button.optimize.secondary { background: var(--panel-2); color: var(--text); }
+  input.tune-in { background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    font: inherit; width: 90px; padding: 4px 8px; border-radius: 4px; text-align: right; }
+  input.tune-in:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -262,6 +266,7 @@
   <button onclick="run(raceForecast, this)">Race forecast<small>Next races · wet-weather risk</small></button>
   <button onclick="run(backtest, this)">Backtest<small>Method shoot-out + auto-tune</small></button>
   <button onclick="run(teamOptimizer, this)">Team optimizer<small>Best 5+2 &amp; captain pick</small></button>
+  <button onclick="run(settings, this)">Settings<small>Model knobs, token, data</small></button>
 </nav>
 
 <div id="status" role="status"></div>
@@ -1512,9 +1517,10 @@ async function snapPair(k, at, isLive) {
 }
 
 function saveOf1Token() {
-  const v = document.getElementById("of1tok").value.trim();
+  const el = document.getElementById("of1tok") || document.getElementById("of1tok2");
+  const v = el.value.trim();
   if (v) localStorage.setItem("pw-of1-token", v); else localStorage.removeItem("pw-of1-token");
-  document.getElementById("of1tok").blur();
+  el.blur();
   setStatus(v ? "OpenF1 token saved on this device — live timing will use it." : "OpenF1 token cleared.", false);
 }
 
@@ -1613,6 +1619,61 @@ async function liveTiming() {
     + `reliable through a full 2-hour race (5s polling can otherwise hit the anonymous limit). Stored only on this device, never sent anywhere but OpenF1.</div></div>`);
   setStatus(isLive ? "Live timing — auto-refreshing every 8s." : "Showing the latest completed session (no race live now).", false);
   if (isLive) liveTimer = setInterval(refresh, 8000);
+}
+
+// ---------- settings ----------
+const TUNE_META = [
+  ["gridW", "Grid weight", "0–1 · how much the starting grid drives the forecast (the strongest signal)"],
+  ["decay", "Recency weight (λ)", "0–1 · lower leans harder on recent rounds; 1 = plain season average"],
+  ["shrinkK", "Shrinkage (k)", "higher trusts the field average more for drivers with few rounds"],
+  ["qualiPts", "Quali weight", "points per 1% of qualifying gap-to-pole improvement"],
+  ["mechW", "Mechanical-DNF weight", "0–1 · how much a mechanical DNF predicts future ones"],
+];
+
+function settings() {
+  stopLive();
+  out.innerHTML = "";
+  const t = tuneParams();
+  title("Settings · prediction model");
+  note("These constants drive the forecast, form predictor and optimizer. The Backtest's auto-tune sets them for "
+    + "you from the data — override here only if you want to experiment.");
+  TUNE_META.forEach(([key, label, desc]) => out.insertAdjacentHTML("beforeend",
+    `<div class="row"><span class="name">${label}<span class="detail">${desc}</span></span>`
+    + `<input class="tune-in" data-key="${key}" type="number" step="0.05" value="${t[key]}"></div>`));
+  out.insertAdjacentHTML("beforeend",
+    `<button class="optimize" onclick="saveTune()">Save model settings</button>`
+    + `<button class="optimize secondary" onclick="resetTune()">Reset to defaults</button><div id="setMsg"></div>`);
+
+  title("Settings · live timing");
+  out.insertAdjacentHTML("beforeend",
+    `<div class="lt-token"><input id="of1tok2" type="password" placeholder="OpenF1 API token (optional)" `
+    + `value="${localStorage.getItem("pw-of1-token") ?? ""}"><button class="optimize" onclick="saveOf1Token()">Save token</button>`
+    + `<div class="note">A free OpenF1 account raises the rate limit — keeps live timing reliable through a full race. Stored on this device only.</div></div>`);
+
+  title("Settings · data & storage");
+  out.insertAdjacentHTML("beforeend",
+    `<button class="optimize" onclick="clearCache()">Clear cached race data</button>`
+    + `<button class="optimize secondary" onclick="clearTeam()">Clear saved fantasy team</button>`
+    + `<div id="dataMsg" class="note">Cached race data makes daily opens near-instant; clearing forces a fresh fetch. `
+    + `Your prices, saved team and settings are stored separately and aren't touched by clearing the cache.</div>`);
+  setStatus("Settings — every change saves on this device only.", false);
+}
+
+function saveTune() {
+  const t = { ...tuneParams() };
+  document.querySelectorAll(".tune-in").forEach(i => { const v = parseFloat(i.value); if (isFinite(v)) t[i.dataset.key] = v; });
+  localStorage.setItem("pw-tune", JSON.stringify(t));
+  document.getElementById("setMsg").innerHTML = `<p class="note">Saved — the forecast, form predictor and optimizer now use these.</p>`;
+}
+function resetTune() { localStorage.removeItem("pw-tune"); settings(); }
+function clearCache() {
+  Object.keys(localStorage).filter(k => k.startsWith(CACHE_VER)).forEach(k => localStorage.removeItem(k));
+  cache.clear(); latestRound = null;
+  document.getElementById("dataMsg").innerHTML = "Cached race data cleared — the next analysis refetches fresh.";
+}
+function clearTeam() {
+  Object.keys(localStorage).filter(k => k.startsWith("pw-own:")).forEach(k => localStorage.removeItem(k));
+  document.getElementById("dataMsg").innerHTML = "Saved fantasy team cleared.";
 }
 
 // ---------- landing dashboard ----------
