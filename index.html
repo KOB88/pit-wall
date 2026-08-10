@@ -133,6 +133,15 @@
   }
   #importBox textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   input.own { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; flex: none; cursor: pointer; }
+  .dash-hero { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+    border-radius: 8px; padding: 14px 16px; margin: 6px 0 4px; }
+  .dash-hero .dh-phase { font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); }
+  .dash-hero .dh-race { font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 800; font-size: 22px;
+    text-transform: uppercase; margin: 3px 0 2px; }
+  .dash-hero .dh-when { color: var(--dim); font-size: 13px; }
+  .dash-hero .dh-when b { color: var(--text); }
+  .dash-hero button { margin: 12px 0 0; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -240,7 +249,7 @@
 <body>
 
 <header>
-  <h1>Pit <span>Wall</span></h1>
+  <h1 onclick="goDashboard()" title="Back to dashboard" style="cursor:pointer">Pit <span>Wall</span></h1>
   <div class="sub">Live season analysis · data: jolpi.ca (Ergast-compatible)</div>
 </header>
 
@@ -273,9 +282,12 @@ function setStatus(msg, busy) {
 const CACHE_VER = "pw1:";
 function cacheTTL(url) {
   if (url.includes("open-meteo")) return 60 * 60e3; // weather forecasts go stale fast
-  // the no-round standings call tells us the latest round — keep it fresh;
-  // everything else is historical race data that never changes
-  return url.endsWith("/current/driverStandings.json") ? 15 * 60e3 : 24 * 3600e3;
+  if (url.endsWith("/current/driverStandings.json")) return 15 * 60e3; // latest-round probe — keep fresh
+  // a completed round's data never changes → cache it effectively forever; the current round
+  // (results/quali appear as the weekend unfolds) and anything undated stays fresh.
+  const m = url.match(/\/current\/(\d+)\//);
+  if (m && latestRound && +m[1] < latestRound) return 60 * 24 * 3600e3; // finished round: 60 days
+  return 15 * 60e3;
 }
 
 async function fetchCached(url, emptyOn404) {
@@ -1603,7 +1615,123 @@ async function liveTiming() {
   if (isLive) liveTimer = setInterval(refresh, 8000);
 }
 
-setStatus("Pick an analysis to begin.", false);
+// ---------- landing dashboard ----------
+function openAnalysis(fn, label) {
+  const b = [...document.querySelectorAll("nav button")].find(x => x.textContent.toLowerCase().includes(label));
+  run(fn, b);
+}
+function goDashboard() {
+  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+  stopLive();
+  dashboard();
+}
+function fmtCountdown(ms) {
+  if (ms <= 0) return "now";
+  const h = ms / 3600e3;
+  if (h < 1) return Math.max(1, Math.round(ms / 60e3)) + " min";
+  if (h < 24) return Math.round(h) + " hr";
+  return Math.round(h / 24) + " days";
+}
+const raceStart = r => Date.parse(r.date + "T" + (r.time || "12:00:00Z"));
+
+let dashRun = 0;
+async function dashboard() {
+  const myRun = ++dashRun; // a newer dashboard() supersedes this one's async writes
+  out.innerHTML = "";
+  setStatus("Loading dashboard…", true);
+  let sched, dStand, cStand;
+  try {
+    [sched, dStand, cStand] = await Promise.all([
+      fetchCached(`${API}/current.json?limit=30`),
+      fetchCached(`${API}/current/driverStandings.json`),
+      fetchCached(`${API}/current/constructorStandings.json`).catch(() => null),
+    ]);
+  } catch (e) {
+    setStatus("", false);
+    out.innerHTML = `<p class="err">Couldn't load the dashboard (${e.message}). Pick an analysis above, or retry.</p>`
+      + `<button class="optimize" onclick="goDashboard()">Retry</button>`;
+    return;
+  }
+  if (myRun !== dashRun) return;
+  const races = sched.MRData.RaceTable.Races;
+  const dList = dStand.MRData.StandingsTable.StandingsLists[0]?.DriverStandings ?? [];
+  latestRound = latestRound || parseInt(dStand.MRData.StandingsTable.round, 10);
+  const now = Date.now();
+
+  // next race + weekend phase
+  const next = races.find(r => raceStart(r) + 2.5 * 3600e3 > now) || races[races.length - 1];
+  const nStart = raceStart(next);
+  const nQuali = next.Qualifying ? Date.parse(next.Qualifying.date + "T" + (next.Qualifying.time || "12:00:00Z")) : null;
+  const flag = countryFlag(next.Circuit.Location.country);
+  let phase, nudge;
+  if (now >= nStart && now < nStart + 2.5 * 3600e3) {
+    phase = "🔴 Race live now"; nudge = { label: "Open live timing", fn: "liveTiming", key: "live" };
+  } else if (nQuali && now >= nQuali && now < nStart) {
+    phase = "Grid is set — qualifying done"; nudge = { label: "See your grid-aware forecast", fn: "raceForecast", key: "forecast" };
+  } else if (nStart - now < 3 * 24 * 3600e3) {
+    phase = "Race weekend"; nudge = { label: "Check the forecast", fn: "raceForecast", key: "forecast" };
+  } else {
+    phase = "Next up"; nudge = { label: "Plan your team", fn: "teamOptimizer", key: "optimizer" };
+  }
+  out.insertAdjacentHTML("beforeend",
+    `<div class="dash-hero"><div class="dh-phase">${phase}</div>`
+    + `<div class="dh-race">${flag}${next.raceName}</div>`
+    + `<div class="dh-when">${next.Circuit.circuitName} · lights out in <b>${fmtCountdown(nStart - now)}</b></div>`
+    + `<button class="optimize" onclick="openAnalysis(${nudge.fn}, '${nudge.key}')">${nudge.label}</button></div>`);
+
+  // championship snapshot
+  title("Championship · top 3");
+  dList.slice(0, 3).forEach(s => rowHTML(s.position, dn(s.Driver.familyName), s.points + " pts", "", s.Constructor?.name || ""));
+  const cList = cStand?.MRData.StandingsTable.StandingsLists[0]?.ConstructorStandings ?? [];
+  cList.slice(0, 3).forEach(s => rowHTML(s.position, s.Constructor.name, s.points + " pts"));
+
+  // last race podium
+  try {
+    const res = (await fetchCached(`${API}/current/${latestRound}/results.json?limit=5`)).MRData.RaceTable.Races[0];
+    if (res) {
+      title(`Round ${latestRound} · ${countryFlag(res.Circuit.Location.country)}${res.raceName}`);
+      res.Results.slice(0, 3).forEach(r => rowHTML(r.position, dn(r.Driver.familyName), r.points + " pts", "", r.Constructor.name));
+    }
+  } catch {}
+
+  // my team snapshot (only if a squad is saved) — computed after the light stuff
+  const ownD = [], ownC = [];
+  for (const k of Object.keys(localStorage)) {
+    if (k.startsWith("pw-own:d:") && localStorage.getItem(k) === "1") ownD.push(k.slice(9));
+    if (k.startsWith("pw-own:c:") && localStorage.getItem(k) === "1") ownC.push(k.slice(9));
+  }
+  if (ownD.length === 5 && ownC.length === 2) {
+    out.insertAdjacentHTML("beforeend", `<div class="section-title">My team · predicted next race</div><div id="dash-team" class="note">Computing…</div>`);
+    try {
+      const { allResults, allSprints, allQuali } = await loadModelData(latestRound);
+      if (myRun !== dashRun) return; // a newer dashboard took over while we computed
+      const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, latestRound), allResults[latestRound - 1]);
+      const preds = predictDrivers(drivers);
+      const teamPred = new Map();
+      for (const p of preds.values()) teamPred.set(p.team, (teamPred.get(p.team) ?? 0) + p.norm);
+      const dPts = ownD.map(n => ({ n, v: preds.get(n)?.norm ?? 0 }));
+      const cap = dPts.reduce((a, x) => x.v > a.v ? x : a, dPts[0]);
+      const total = dPts.reduce((a, x) => a + x.v, 0) + cap.v + ownC.reduce((a, n) => a + (teamPred.get(n) ?? 0), 0);
+      document.getElementById("dash-team").outerHTML =
+        `<div class="section-title">My team · ~${Math.round(total)} pts next race</div>`
+        + dPts.sort((a, b) => b.v - a.v).map(x => rowStr(dn(x.n) + (x === cap ? ` <span class="fl">DRS</span>` : ""), x.v.toFixed(1) + " pts")).join("")
+        + ownC.map(n => rowStr(n + `<span class="detail">constructor</span>`, (teamPred.get(n) ?? 0).toFixed(1) + " pts")).join("")
+        + `<p class="note">DRS-boost captain doubled in the total. Full swaps in Team optimizer → Transfer planner.</p>`;
+    } catch (e) {
+      const el = document.getElementById("dash-team"); if (el) el.textContent = "Couldn't compute team points right now.";
+    }
+  }
+
+  out.insertAdjacentHTML("beforeend",
+    `<p class="note">Data through Round ${latestRound} · updated ${new Date().toLocaleTimeString()}. Tap “Pit Wall” up top to return here.</p>`);
+  setStatus("", false);
+}
+
+function rowStr(name, val, valClass = "") {
+  return `<div class="row"><span class="name">${name}</span><span class="val ${valClass}">${val}</span></div>`;
+}
+
+goDashboard();
 </script>
 </body>
 </html>
