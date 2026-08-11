@@ -1,0 +1,35 @@
+name: Update F1 Fantasy prices
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:       # and on-demand from the Actions tab
+
+permissions:
+  contents: write          # allow committing prices.json back to the repo
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fetch prices
+        env:
+          FEED_URL: ${{ vars.FEED_URL }}
+          FEED_AUTH: ${{ secrets.FEED_AUTH }}
+          FEED_COOKIE: ${{ secrets.FEED_COOKIE }}
+        run: node scripts/fetch-prices.mjs
+      - name: Commit if changed
+        run: |
+          git config user.name "pit-wall-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f prices.json ] && ! git diff --quiet -- prices.json; then
+            git add prices.json
+            git commit -m "chore: update prices.json [skip ci]"
+            git push
+          else
+            echo "No price change."
+          fi
