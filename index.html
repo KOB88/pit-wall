@@ -1072,7 +1072,8 @@ async function teamOptimizer() {
     `<button class="optimize" onclick="toggleImport()">Import real prices (paste JSON)</button>`
     + `<div id="importBox" style="display:none">`
     + `<textarea id="importJson" placeholder='Paste prices, e.g. {"drivers":{"Verstappen":28.5},"constructors":{"McLaren":24}}'></textarea>`
-    + `<button class="optimize" onclick="applyImport()">Apply prices</button><div id="importMsg"></div></div>`);
+    + `<button class="optimize" onclick="applyImport()">Apply prices</button><div id="importMsg"></div></div>`
+    + `<div id="feedMsg"></div>`);
   const priceInput = (kind, name, pts, est, ceil = 0) => {
     const stored = localStorage.getItem(priceKey(kind, name));
     const owned = localStorage.getItem(`pw-own:${kind}:${name}`) === "1" ? " checked" : "";
@@ -1101,6 +1102,28 @@ async function teamOptimizer() {
     + `<div class="row"><span class="name">Points hit per extra transfer</span>`
     + `<input id="tfHit" type="number" min="0" step="1" value="${localStorage.getItem("pw-tfhit") ?? 10}"></div>`
     + `<button class="optimize" onclick="planTransfers()">Plan transfers</button><div id="tfOut"></div>`);
+  loadPriceFeed(); // auto-fill from prices.json if a GitHub Action is publishing it (same-origin, no CORS)
+}
+
+// fetch the app's own prices.json (produced by the update-prices GitHub Action) and fill the inputs
+async function loadPriceFeed() {
+  let feed;
+  try {
+    const r = await fetch("./prices.json?t=" + Date.now());
+    if (!r.ok) return; // no feed published yet — silently keep estimates/manual prices
+    feed = await r.json();
+  } catch { return; }
+  const pairs = collectPrices(feed);
+  if (!pairs.length) return;
+  let n = 0;
+  document.querySelectorAll("input.price").forEach(inp => {
+    const app = normName(inp.dataset.name);
+    const hit = pairs.find(([nm]) => { const x = normName(nm); return x === app || x.includes(app) || app.includes(x); });
+    if (hit) { inp.value = hit[1]; n++; }
+  });
+  const when = feed.updated ? " · updated " + new Date(feed.updated).toLocaleDateString() : "";
+  const el = document.getElementById("feedMsg");
+  if (el) el.innerHTML = `<p class="note">✓ Loaded ${n} live prices from prices.json${when}. Edit any to override for this session.</p>`;
 }
 
 function toggleOwn(el) {
