@@ -1050,19 +1050,30 @@ function priceKey(kind, name) { return `pw-price:${kind}:${name}`; }
 async function teamOptimizer() {
   const last = await getLatestRound();
   const { allResults, allSprints, allQuali } = await loadModelData(last);
-  const drivers = activeOnly(buildDriverData(allResults, allSprints, allQuali, last), allResults[last - 1]);
+  // no last-round filter here — the optimizer must list every driver you could pick, including
+  // ones who DNF'd, never finished, or missed the latest race
+  const drivers = buildDriverData(allResults, allSprints, allQuali, last);
   const preds = predictDrivers(drivers);
 
-  // constructor prediction = sum of its drivers' predictions
-  const teamPred = new Map();
+  // every driver who has STARTED a race this season — includes DNF-only drivers and anyone who
+  // missed the latest round, but not FP1-only reserves (who aren't pickable in the fantasy game)
+  const dNames = [...preds.keys()];
+
+  const driverPts = n => preds.get(n)?.norm ?? 0;
+  const teamPred = new Map(); // constructor prediction = sum of its drivers'
   for (const p of preds.values()) teamPred.set(p.team, (teamPred.get(p.team) ?? 0) + p.norm);
+  // full constructor entry list so a team yet to score still appears (no reserve-driver problem for teams)
+  try {
+    const cj = await fetchCached(`${API}/current/constructors.json?limit=50`);
+    for (const c of cj.MRData.ConstructorTable.Constructors || []) if (!teamPred.has(c.name)) teamPred.set(c.name, 0);
+  } catch {}
 
   // no public price API — prefill with estimates scaled from predicted points ($4.5M-$30M, the game's range)
   const scale = vals => {
     const min = Math.min(...vals), max = Math.max(...vals);
     return v => 4.5 + ((v - min) / ((max - min) || 1)) * 25.5;
   };
-  const dEst = scale([...preds.values()].map(p => p.norm));
+  const dEst = scale(dNames.map(driverPts));
   const tEst = scale([...teamPred.values()]);
 
   title("Team optimizer · driver prices ($M)");
@@ -1083,9 +1094,9 @@ async function teamOptimizer() {
       + `<input class="price" data-kind="${kind}" data-name="${name}" data-pts="${pts.toFixed(2)}" data-ceil="${ceil.toFixed(1)}" type="number" `
       + `min="0" step="0.1" placeholder="$M" value="${stored ?? est.toFixed(1)}"></div>`;
   };
-  [...preds.keys()].sort((a, b) => preds.get(b).norm - preds.get(a).norm)
+  dNames.sort((a, b) => driverPts(b) - driverPts(a))
     .forEach(nm => out.insertAdjacentHTML("beforeend",
-      priceInput("d", nm, preds.get(nm).norm, dEst(preds.get(nm).norm), preds.get(nm).ceil)));
+      priceInput("d", nm, driverPts(nm), dEst(driverPts(nm)), preds.get(nm)?.ceil ?? 0)));
   title("Constructor prices ($M)");
   [...teamPred.keys()].sort((a, b) => teamPred.get(b) - teamPred.get(a))
     .forEach(t => out.insertAdjacentHTML("beforeend", priceInput("c", t, teamPred.get(t), tEst(teamPred.get(t)))));
