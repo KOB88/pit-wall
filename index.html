@@ -1672,29 +1672,108 @@ async function liveTiming() {
 }
 
 // ---------- FastF1 telemetry analysis ----------
+// Powered by the FastF1 server (the F1 project's server.py). FastF1 can't run in a browser,
+// so this fetches real car telemetry from that local server; falls back to a static file.
 let telData = null, telA = null, telB = null;
+const TEL_URL_DEFAULT = "http://localhost:8000";
+function telUrl() { return (localStorage.getItem("pw-ff1-url") || TEL_URL_DEFAULT).replace(/\/+$/, ""); }
+
+async function telApi(path) {
+  const r = await fetch(telUrl() + path);
+  if (r.status === 202) { const e = new Error("loading"); e.loading = true; throw e; }
+  if (!r.ok) { let m = r.status; try { const b = await r.json(); m = b.detail?.error || b.detail || m; } catch {} throw new Error(typeof m === "string" ? m : "HTTP " + m); }
+  return r.json();
+}
 
 async function telemetry() {
   stopLive();
-  out.innerHTML = "";
-  setStatus("Loading telemetry…", true);
-  try {
-    const r = await fetch("./telemetry/latest.json?t=" + Date.now());
-    if (!r.ok) throw new Error("no file");
-    telData = await r.json();
-  } catch {
-    setStatus("", false);
-    out.innerHTML = `<div class="section-title">Telemetry analysis</div>`
-      + `<p class="note">No telemetry published yet. This section is powered by <b>FastF1</b>, which runs server-side `
-      + `(scripts/fetch-telemetry.py + the update-telemetry GitHub Action) and writes telemetry/latest.json after a `
-      + `session. Once it runs, full-lap speed / throttle / brake / gear traces and driver-vs-driver comparison appear here.</p>`;
-    return;
-  }
   setStatus("", false);
-  const ds = telData.drivers || [];
-  if (!ds.length) { out.innerHTML = `<p class="note">Telemetry file has no drivers.</p>`; return; }
-  telA = telA && ds.some(d => d.code === telA) ? telA : ds[0].code;
-  if (telB && !ds.some(d => d.code === telB)) telB = null;
+  out.innerHTML = `<div class="section-title">Telemetry analysis · FastF1</div>`
+    + `<div class="lt-token"><input id="telurl" placeholder="FastF1 server URL" value="${telUrl()}">`
+    + `<button class="optimize" onclick="telConnect()">Connect</button>`
+    + `<div class="note">Real car telemetry comes from your local <b>FastF1 server</b> (run <code>./run.sh</code> in the F1 project — default ${TEL_URL_DEFAULT}). A static site can't run FastF1 itself. The URL is saved on this device.</div></div>`
+    + `<div id="tel-main"><p class="note">Connecting…</p></div>`;
+  telConnect();
+}
+
+async function telConnect() {
+  const u = document.getElementById("telurl");
+  if (u) localStorage.setItem("pw-ff1-url", (u.value.trim() || TEL_URL_DEFAULT));
+  const main = document.getElementById("tel-main");
+  main.innerHTML = `<p class="note"><span class="blink">●</span> Connecting to ${telUrl()}…</p>`;
+  let years;
+  try { years = await telApi("/api/years"); }
+  catch {
+    main.innerHTML = `<p class="err">Can't reach a FastF1 server at ${telUrl()}.</p>`
+      + `<p class="note">Start it: in the F1 project run <code>./run.sh</code> (serves on ${TEL_URL_DEFAULT}), then Connect again.</p>`;
+    return telStatic(main);
+  }
+  main.innerHTML = `<div class="tel-row"><span class="tel-lbl">Season</span>`
+    + `<select id="telyr" onchange="telSeason()">${years.map(y => `<option>${y}</option>`).join("")}</select>`
+    + `<select id="telrnd"></select>`
+    + `<button class="optimize" style="width:auto;margin:0;padding:7px 14px" onclick="telLoad()">Load</button></div>`
+    + `<div id="tel-view"><p class="note">Pick a season and round, then Load. Very recent races may not have telemetry archived yet — historical seasons always do.</p></div>`;
+  telSeason();
+}
+
+async function telSeason() {
+  const y = +document.getElementById("telyr").value, sel = document.getElementById("telrnd");
+  sel.innerHTML = `<option>…</option>`;
+  try {
+    const sch = await telApi(`/api/schedule/${y}`);
+    const done = sch.events.filter(e => (e.sessions || []).some(s => s.abbr === "R" && s.completed));
+    sel.innerHTML = done.reverse().map(e => `<option value="${e.round}">R${e.round} · ${e.name}</option>`).join("")
+      || `<option value="">no completed races</option>`;
+  } catch { sel.innerHTML = `<option value="">schedule unavailable</option>`; }
+}
+
+async function telLoad() {
+  const y = +document.getElementById("telyr").value, rnd = +document.getElementById("telrnd").value;
+  if (!rnd) return;
+  const view = document.getElementById("tel-view");
+  const tick = (m, s) => { view.innerHTML = `<p class="note"><span class="blink">●</span> Loading ${y} R${rnd}… ${m || ""}${s ? " · " + s + "s" : ""}</p>`; };
+  try {
+    for (;;) {
+      const st = await telApi(`/api/session/${y}/${rnd}/R/status`);
+      if (st.status === "ready") break;
+      if (st.status === "error") throw new Error(st.error || "load failed");
+      tick(st.message, st.elapsed); await new Promise(r => setTimeout(r, 1200));
+    }
+    tick("fetching drivers");
+    const sum = await telApi(`/api/session/${y}/${rnd}/R/summary`);
+    const drivers = sum.drivers || [];
+    const loaded = []; let i = 0, done = 0;
+    async function worker() {
+      while (i < drivers.length) {
+        const d = drivers[i++];
+        try { loaded.push(telMap(d, await telApi(`/api/session/${y}/${rnd}/R/telemetry/${d.abbr}`))); } catch {}
+        tick(`telemetry ${++done}/${drivers.length}`);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, drivers.length) }, worker));
+    if (!loaded.length) { view.innerHTML = `<p class="err">No telemetry for ${y} R${rnd} — it isn't archived yet (common for the most recent races). Try an earlier season.</p>`; return; }
+    loaded.sort((a, b) => (a.lap_time ?? 9e9) - (b.lap_time ?? 9e9));
+    telData = { session: `${y} · ${drivers.length ? "Race" : ""} R${rnd}`, drivers: loaded };
+    telA = loaded[0].code; telB = null;
+    renderTelemetry();
+  } catch (e) { view.innerHTML = `<p class="err">Load failed: ${e.message}</p>`; }
+}
+
+function telMap(d, t) {
+  return {
+    code: d.abbr, name: d.lastName || d.abbr, team: d.team,
+    colour: (d.teamColor || "").replace(/^#/, "") || "888", lap_time: t.lapTime,
+    dist: t.dist, speed: t.speed, throttle: t.throttle,
+    brake: (t.brake || []).map(b => b * 100), gear: t.gear,
+  };
+}
+
+async function telStatic(main) {
+  try { const r = await fetch("./telemetry/latest.json?t=" + Date.now()); if (!r.ok) throw 0; telData = await r.json(); }
+  catch { return; }
+  const ds = telData.drivers || []; if (!ds.length) return;
+  telA = ds[0].code; telB = null;
+  main.insertAdjacentHTML("beforeend", `<p class="note">Showing published static telemetry (no live server):</p><div id="tel-view"></div>`);
   renderTelemetry();
 }
 
@@ -1731,9 +1810,10 @@ function renderTelemetry() {
     `<button class="tel-chip${(sel === "a" ? telA : telB) === d.code ? " on" : ""}" style="border-color:${telColor(d)}" `
     + `onclick="telPick('${sel}','${d.code}')">${d.code}</button>`).join("");
   const a = ds.find(d => d.code === telA), b = telB ? ds.find(d => d.code === telB) : null;
-  out.innerHTML =
-    `<div class="section-title">Telemetry analysis · ${telData.session}</div>`
-    + `<p class="note">Fastest-lap traces from FastF1. Pick a driver, and optionally a second to overlay (dashed) for a head-to-head.</p>`
+  const view = document.getElementById("tel-view") || out;
+  view.innerHTML =
+    `<div class="tel-ct">${telData.session} — fastest laps</div>`
+    + `<p class="note">Pick a driver, and optionally a second to overlay (dashed) for a head-to-head.</p>`
     + `<div class="tel-row"><span class="tel-lbl">Driver</span><div class="tel-chips">${chips("a")}</div></div>`
     + `<div class="tel-row"><span class="tel-lbl">Compare</span><div class="tel-chips"><button class="tel-chip${telB ? "" : " on"}" onclick="telPick('b','')">none</button>${chips("b")}</div></div>`
     + `<div class="tel-legend"><span style="color:${telColor(a)}">— ${a.code} ${telLap(a.lap_time)}</span>`
@@ -1741,7 +1821,7 @@ function renderTelemetry() {
     + telChart("Speed", "speed", 0, Math.max(...ds.flatMap(d => d.speed)) + 10, "km/h")
     + telChart("Throttle", "throttle", 0, 100, "%")
     + telChart("Brake", "brake", 0, 100, "%")
-    + `<p class="note">Traces run left→right along a lap by track distance. ${telData.session.includes("SAMPLE") ? "<b>This is sample data</b> — the FastF1 pipeline replaces it with the real session." : ""}</p>`;
+    + `<p class="note">Traces run left→right along a lap by track distance.${telData.session.includes("SAMPLE") ? " <b>Sample data</b> — connect a FastF1 server for real sessions." : ""}</p>`;
 }
 
 function telPick(which, code) {
