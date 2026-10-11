@@ -161,6 +161,14 @@
   .tel-chart svg { width: 100%; height: 150px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
   .tel-chart .tg { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .tel-chart .tgl { fill: var(--dim); font: 10px 'JetBrains Mono', monospace; }
+  svg.tm { width: 100%; max-height: 62vh; aspect-ratio: 1; background: var(--panel); border: 2px solid var(--line); border-radius: 8px; margin: 6px 0; }
+  svg.tm[data-flag="2"], svg.tm[data-flag="6"], svg.tm[data-flag="7"] { border-color: #ffd24a; }
+  svg.tm[data-flag="4"] { border-color: #ff8a00; }
+  svg.tm[data-flag="5"] { border-color: #da291c; }
+  .tm-outline { fill: none; stroke: #8b8b95; stroke-width: 12; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+  .tm-ctl { display: flex; align-items: center; gap: 10px; margin: 4px 0 2px; }
+  .tm-ctl input[type=range] { flex: 1; accent-color: var(--accent); }
+  .tm-time { font: 600 13px 'JetBrains Mono', monospace; min-width: 4ch; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -361,7 +369,7 @@ async function getLatestRound() {
 }
 
 let liveTimer = null;
-function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } if (typeof telMapStop === "function") telMapStop(); }
 
 async function run(analysis, btn) {
   stopLive(); // leaving any live-timing poll behind would keep hammering the API
@@ -1753,7 +1761,7 @@ async function telLoad() {
     await Promise.all(Array.from({ length: Math.min(4, drivers.length) }, worker));
     if (!loaded.length) { view.innerHTML = `<p class="err">No telemetry for ${y} R${rnd} — it isn't archived yet (common for the most recent races). Try an earlier season.</p>`; return; }
     loaded.sort((a, b) => (a.lap_time ?? 9e9) - (b.lap_time ?? 9e9));
-    telData = { session: `${y} · ${drivers.length ? "Race" : ""} R${rnd}`, drivers: loaded };
+    telData = { session: `${y} · Race R${rnd}`, drivers: loaded, live: true, y, rnd };
     telA = loaded[0].code; telB = null;
     renderTelemetry();
   } catch (e) { view.innerHTML = `<p class="err">Load failed: ${e.message}</p>`; }
@@ -1805,6 +1813,7 @@ function telChart(title, key, min, max, unit) {
 }
 
 function renderTelemetry() {
+  telMapStop(); // a re-render rebuilds the (empty) map container
   const ds = telData.drivers;
   const chips = sel => ds.map(d =>
     `<button class="tel-chip${(sel === "a" ? telA : telB) === d.code ? " on" : ""}" style="border-color:${telColor(d)}" `
@@ -1821,13 +1830,104 @@ function renderTelemetry() {
     + telChart("Speed", "speed", 0, Math.max(...ds.flatMap(d => d.speed)) + 10, "km/h")
     + telChart("Throttle", "throttle", 0, 100, "%")
     + telChart("Brake", "brake", 0, 100, "%")
-    + `<p class="note">Traces run left→right along a lap by track distance.${telData.session.includes("SAMPLE") ? " <b>Sample data</b> — connect a FastF1 server for real sessions." : ""}</p>`;
+    + `<p class="note">Traces run left→right along a lap by track distance.${telData.session.includes("SAMPLE") ? " <b>Sample data</b> — connect a FastF1 server for real sessions." : ""}</p>`
+    + (telData.live ? `<button class="optimize" onclick="telShowMap()">Load track replay (all cars)</button><div id="tel-map"></div>` : "");
 }
 
 function telPick(which, code) {
   if (which === "a") { telA = code; if (telB === code) telB = null; }
   else telB = code || null;
   renderTelemetry();
+}
+
+// ---- track replay (the live map) ----
+let telRep = null, telTf = null, telFrame = 0, telRAF = null, telPlaying = false, telSpeed = 30, telColors = {};
+function telMapStop() { telPlaying = false; if (telRAF) { cancelAnimationFrame(telRAF); telRAF = null; } }
+
+function telBuildTf(track) {
+  const rot = (track.rotation || 0) * Math.PI / 180, cos = Math.cos(rot), sin = Math.sin(rot);
+  const rx = (x, y) => x * cos - y * sin, ry = (x, y) => x * sin + y * cos;
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (let i = 0; i < track.x.length; i++) {
+    const X = rx(track.x[i], track.y[i]), Y = ry(track.x[i], track.y[i]);
+    if (X < minX) minX = X; if (X > maxX) maxX = X; if (Y < minY) minY = Y; if (Y > maxY) maxY = Y;
+  }
+  const S = 1000, pad = 44, sc = Math.min((S - 2 * pad) / ((maxX - minX) || 1), (S - 2 * pad) / ((maxY - minY) || 1));
+  const w = (maxX - minX) * sc, h = (maxY - minY) * sc, ox = (S - w) / 2, oy = (S - h) / 2;
+  return { pt: (x, y) => { const X = rx(x, y), Y = ry(x, y); return [ox + (X - minX) * sc, S - (oy + (Y - minY) * sc)]; } };
+}
+
+async function telShowMap() {
+  const box = document.getElementById("tel-map");
+  box.innerHTML = `<p class="note"><span class="blink">●</span> Loading track + replay (all cars, whole session)…</p>`;
+  const { y, rnd } = telData;
+  let track, rep;
+  try {
+    [track, rep] = await Promise.all([
+      telApi(`/api/session/${y}/${rnd}/R/track`),
+      telApi(`/api/session/${y}/${rnd}/R/replay`),
+    ]);
+  } catch (e) { box.innerHTML = `<p class="err">Couldn't load the replay: ${e.message}</p>`; return; }
+  telRep = rep; telTf = telBuildTf(track); telFrame = 0; telMapStop();
+  telColors = {}; for (const d of telData.drivers) telColors[d.code] = telColor(d);
+  const outline = track.x.map((x, i) => telTf.pt(x, track.y[i]).map(v => v.toFixed(1)).join(",")).join(" ");
+  const cars = Object.keys(rep.drivers).map(ab =>
+    `<g id="tm-g-${ab}" style="display:none"><circle r="13" fill="${telColors[ab] || "#888"}" stroke="#fff" stroke-width="2"/>`
+    + `<text y="4" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">${ab}</text></g>`).join("");
+  box.innerHTML =
+    `<div class="tel-ct">Track replay · ${Object.keys(rep.drivers).length} cars</div>`
+    + `<svg class="tm" id="tm-svg" viewBox="0 0 1000 1000"><polyline class="tm-outline" points="${outline}"/>${cars}</svg>`
+    + `<div class="tm-ctl"><button class="optimize" id="tm-play" style="width:auto;margin:0;padding:6px 14px" onclick="telMapToggle()">▶</button>`
+    + `<input type="range" id="tm-slider" min="0" max="${rep.n - 1}" value="0" oninput="telMapSeek(this.value)">`
+    + `<button class="tel-chip" onclick="telMapSpeed()"><span id="tm-spd">30×</span></button>`
+    + `<span class="tm-time" id="tm-time">0:00</span></div>`
+    + `<p class="note">All cars over the whole session at 2 Hz. Scrub the slider or play; the track flag colours the border (green/yellow/SC).</p>`;
+  telDrawFrame(0);
+}
+
+function telDrawFrame(f) {
+  const rep = telRep; if (!rep) return;
+  for (const ab in rep.drivers) {
+    const g = document.getElementById("tm-g-" + ab); if (!g) continue;
+    const x = rep.drivers[ab].x[f], yv = rep.drivers[ab].y[f];
+    if (x == null || yv == null) { g.style.display = "none"; continue; }
+    const [px, py] = telTf.pt(x, yv);
+    g.style.display = ""; g.setAttribute("transform", `translate(${px.toFixed(1)},${py.toFixed(1)})`);
+  }
+  const t = rep.t0 + f * rep.dt - (rep.sessionStart ?? rep.t0);
+  const tt = document.getElementById("tm-time"); if (tt) tt.textContent = (t < 0 ? "–" : "") + Math.floor(Math.abs(t) / 60) + ":" + String(Math.floor(Math.abs(t) % 60)).padStart(2, "0");
+  // flag colour on the border from the track-status timeline
+  const svg = document.getElementById("tm-svg");
+  if (svg) {
+    const now = rep.t0 + f * rep.dt;
+    let st = "1"; for (const s of rep.trackStatus) if (s.t <= now) st = s.status; else break;
+    svg.dataset.flag = st;
+  }
+}
+
+function telMapSeek(v) { telFrame = +v; telDrawFrame(Math.round(telFrame)); }
+function telMapToggle() { telPlaying ? telMapStop2() : telMapPlay(); }
+function telMapStop2() { telMapStop(); const b = document.getElementById("tm-play"); if (b) b.textContent = "▶"; }
+function telMapPlay() {
+  telMapStop(); // single rAF loop
+  const b = document.getElementById("tm-play"); if (b) b.textContent = "❚❚";
+  telPlaying = true;
+  let last = performance.now();
+  const loop = now => {
+    if (!telPlaying) return;
+    telFrame += ((now - last) / 1000) * telSpeed / telRep.dt; // real-elapsed × speed, in frames
+    last = now;
+    if (telFrame >= telRep.n - 1) { telFrame = telRep.n - 1; telDrawFrame(telFrame); const sl = document.getElementById("tm-slider"); if (sl) sl.value = telFrame; return telMapStop2(); }
+    telDrawFrame(Math.round(telFrame));
+    const sl = document.getElementById("tm-slider"); if (sl) sl.value = Math.round(telFrame);
+    telRAF = requestAnimationFrame(loop);
+  };
+  telRAF = requestAnimationFrame(loop);
+}
+function telMapSpeed() {
+  const steps = [15, 30, 60, 120];
+  telSpeed = steps[(steps.indexOf(telSpeed) + 1) % steps.length];
+  const s = document.getElementById("tm-spd"); if (s) s.textContent = telSpeed + "×";
 }
 
 // ---------- settings ----------
