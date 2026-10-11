@@ -169,6 +169,9 @@
   .tm-ctl { display: flex; align-items: center; gap: 10px; margin: 4px 0 2px; }
   .tm-ctl input[type=range] { flex: 1; accent-color: var(--accent); }
   .tm-time { font: 600 13px 'JetBrains Mono', monospace; min-width: 4ch; }
+  .tel-adv { margin-top: 10px; color: var(--dim); font-size: 12px; }
+  .tel-adv summary { cursor: pointer; }
+  .tel-row select { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); font: inherit; padding: 4px 6px; border-radius: 4px; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -1693,15 +1696,65 @@ async function telApi(path) {
   return r.json();
 }
 
+let telIdx = [];
 async function telemetry() {
   stopLive();
   setStatus("", false);
-  out.innerHTML = `<div class="section-title">Telemetry analysis · FastF1</div>`
-    + `<div class="lt-token"><input id="telurl" placeholder="FastF1 server URL" value="${telUrl()}">`
-    + `<button class="optimize" onclick="telConnect()">Connect</button>`
-    + `<div class="note">Real car telemetry comes from your local <b>FastF1 server</b> (run <code>./run.sh</code> in the F1 project — default ${TEL_URL_DEFAULT}). A static site can't run FastF1 itself. The URL is saved on this device.</div></div>`
-    + `<div id="tel-main"><p class="note">Connecting…</p></div>`;
-  telConnect();
+  out.innerHTML = `<div class="section-title">Telemetry analysis · FastF1</div><div id="tel-shell"><p class="note">Loading…</p></div>`;
+  let index = null;
+  try { const r = await fetch("./telemetry/index.json?t=" + Date.now()); if (r.ok) index = await r.json(); } catch {}
+  const shell = document.getElementById("tel-shell");
+  if (index && index.sessions && index.sessions.length) {
+    telIdx = index.sessions;
+    const years = [...new Set(telIdx.map(s => s.year))].sort((a, b) => b - a);
+    shell.innerHTML = `<div class="tel-row"><span class="tel-lbl">Season</span>`
+      + `<select id="telyr" onchange="telIdxSeason()">${years.map(y => `<option>${y}</option>`).join("")}</select>`
+      + `<select id="telrnd" onchange="telStaticLoad()"></select></div>`
+      + `<div id="tel-main"><p class="note">Pick a race.</p></div>`
+      + `<details class="tel-adv"><summary>Advanced · live FastF1 server</summary>`
+      + `<div class="lt-token"><input id="telurl" value="${telUrl()}"><button class="optimize" onclick="telConnect()">Connect server</button>`
+      + `<div class="note">For the full animated all-cars replay map and any session on demand, run the FastF1 server and connect here.</div></div></details>`;
+    telIdxSeason(); telStaticLoad();
+  } else {
+    shell.innerHTML = `<div class="lt-token"><input id="telurl" value="${telUrl()}"><button class="optimize" onclick="telConnect()">Connect server</button>`
+      + `<div class="note">No published telemetry yet. Connect a local <b>FastF1 server</b>, or run scripts/export-static.py to publish sessions for the deployed site.</div></div><div id="tel-main"></div>`;
+    telConnect();
+  }
+}
+
+function telIdxSeason() {
+  const y = +document.getElementById("telyr").value, sel = document.getElementById("telrnd");
+  sel.innerHTML = telIdx.filter(s => s.year === y).sort((a, b) => b.round - a.round)
+    .map(s => `<option value="${s.round}">R${s.round} · ${s.name}</option>`).join("") || `<option value="">—</option>`;
+}
+
+async function telStaticLoad() {
+  const y = +document.getElementById("telyr").value, rnd = +document.getElementById("telrnd").value;
+  const main = document.getElementById("tel-main");
+  if (!rnd) { main.innerHTML = `<p class="note">No race selected.</p>`; return; }
+  main.innerHTML = `<p class="note"><span class="blink">●</span> Loading ${y} R${rnd}…</p>`;
+  try {
+    const r = await fetch(`./telemetry/${y}/${rnd}.json?t=` + Date.now());
+    if (!r.ok) throw new Error("not published");
+    const d = await r.json();
+    telData = { session: d.session, drivers: d.drivers, track: d.track, live: false };
+    telA = d.drivers[0].code; telB = null;
+    main.innerHTML = `<div id="tel-view"></div>`;
+    renderTelemetry();
+  } catch (e) { main.innerHTML = `<p class="err">Couldn't load ${y} R${rnd}: ${e.message}</p>`; }
+}
+
+function telRacingMap() {
+  const t = telData.track; if (!t || !t.x || !t.x.length) return "";
+  const tf = telBuildTf(t);
+  const path = pts => pts.map((p, i) => tf.pt(p[0], p[1]).map(v => v.toFixed(1)).join(",")).join(" ");
+  const outline = path(t.x.map((x, i) => [x, t.y[i]]));
+  const line = (d, dash) => (d && d.x && d.x.length)
+    ? `<polyline points="${path(d.x.map((x, i) => [x, d.y[i]]))}" fill="none" stroke="${telColor(d)}" stroke-width="3"${dash ? ' stroke-dasharray="7 5"' : ""} vector-effect="non-scaling-stroke"/>` : "";
+  const a = telData.drivers.find(d => d.code === telA), b = telB ? telData.drivers.find(d => d.code === telB) : null;
+  return `<div class="tel-ct">Racing line${b ? ` · ${a.code} vs ${b.code}` : ""}</div>`
+    + `<svg class="tm" viewBox="0 0 1000 1000"><polyline class="tm-outline" points="${outline}"/>${line(a, false)}${line(b, true)}</svg>`
+    + `<p class="note">Each driver's fastest-lap racing line on the circuit. The animated all-cars replay needs the live server (Advanced).</p>`;
 }
 
 async function telConnect() {
@@ -1831,7 +1884,7 @@ function renderTelemetry() {
     + telChart("Throttle", "throttle", 0, 100, "%")
     + telChart("Brake", "brake", 0, 100, "%")
     + `<p class="note">Traces run left→right along a lap by track distance.${telData.session.includes("SAMPLE") ? " <b>Sample data</b> — connect a FastF1 server for real sessions." : ""}</p>`
-    + (telData.live ? `<button class="optimize" onclick="telShowMap()">Load track replay (all cars)</button><div id="tel-map"></div>` : "");
+    + (telData.live ? `<button class="optimize" onclick="telShowMap()">Load track replay (all cars)</button><div id="tel-map"></div>` : telRacingMap());
 }
 
 function telPick(which, code) {
