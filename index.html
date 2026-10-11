@@ -146,6 +146,21 @@
   input.tune-in { background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
     font: inherit; width: 90px; padding: 4px 8px; border-radius: 4px; text-align: right; }
   input.tune-in:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .tel-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .tel-lbl { color: var(--dim); font-size: 12px; min-width: 4.5em; }
+  .tel-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tel-chip { font: 600 12px 'JetBrains Mono', monospace; padding: 4px 9px; border-radius: 5px;
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-bottom-width: 2px; cursor: pointer; }
+  .tel-chip.on { background: var(--panel-2); border-color: var(--accent); }
+  .tel-legend { font: 600 12px 'JetBrains Mono', monospace; margin: 8px 2px 2px; }
+  .tel-legend span { margin-right: 14px; }
+  .tel-chart { margin: 10px 0; }
+  .tel-ct { font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.04em; color: var(--dim); margin-bottom: 2px; }
+  .tel-ct i { color: var(--dim); font-weight: 500; font-style: normal; text-transform: none; }
+  .tel-chart svg { width: 100%; height: 150px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  .tel-chart .tg { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .tel-chart .tgl { fill: var(--dim); font: 10px 'JetBrains Mono', monospace; }
   .row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button.optimize {
     font-family: 'Archivo', sans-serif; font-stretch: 75%; font-weight: 700; font-size: 14px;
@@ -266,6 +281,7 @@
   <button onclick="run(raceForecast, this)">Race forecast<small>Next races · wet-weather risk</small></button>
   <button onclick="run(backtest, this)">Backtest<small>Method shoot-out + auto-tune</small></button>
   <button onclick="run(teamOptimizer, this)">Team optimizer<small>Best 5+2 &amp; captain pick</small></button>
+  <button onclick="run(telemetry, this)">Telemetry<small>FastF1 lap traces &amp; compare</small></button>
   <button onclick="run(settings, this)">Settings<small>Model knobs, token, data</small></button>
 </nav>
 
@@ -1653,6 +1669,85 @@ async function liveTiming() {
     + `reliable through a full 2-hour race (5s polling can otherwise hit the anonymous limit). Stored only on this device, never sent anywhere but OpenF1.</div></div>`);
   setStatus(isLive ? "Live timing — auto-refreshing every 8s." : "Showing the latest completed session (no race live now).", false);
   if (isLive) liveTimer = setInterval(refresh, 8000);
+}
+
+// ---------- FastF1 telemetry analysis ----------
+let telData = null, telA = null, telB = null;
+
+async function telemetry() {
+  stopLive();
+  out.innerHTML = "";
+  setStatus("Loading telemetry…", true);
+  try {
+    const r = await fetch("./telemetry/latest.json?t=" + Date.now());
+    if (!r.ok) throw new Error("no file");
+    telData = await r.json();
+  } catch {
+    setStatus("", false);
+    out.innerHTML = `<div class="section-title">Telemetry analysis</div>`
+      + `<p class="note">No telemetry published yet. This section is powered by <b>FastF1</b>, which runs server-side `
+      + `(scripts/fetch-telemetry.py + the update-telemetry GitHub Action) and writes telemetry/latest.json after a `
+      + `session. Once it runs, full-lap speed / throttle / brake / gear traces and driver-vs-driver comparison appear here.</p>`;
+    return;
+  }
+  setStatus("", false);
+  const ds = telData.drivers || [];
+  if (!ds.length) { out.innerHTML = `<p class="note">Telemetry file has no drivers.</p>`; return; }
+  telA = telA && ds.some(d => d.code === telA) ? telA : ds[0].code;
+  if (telB && !ds.some(d => d.code === telB)) telB = null;
+  renderTelemetry();
+}
+
+function telColor(d) { return d.colour ? "#" + d.colour : "#888"; }
+function telLap(t) { return t == null ? "—" : fmtLap(t); } // reuse the live-timing lap formatter
+
+function telTrace(d, key, geo, min, max, dash) {
+  const { x0, y0, w, h, maxX } = geo;
+  const pts = d.dist.map((dx, i) => {
+    const px = x0 + (dx / maxX) * w;
+    const py = y0 + h - ((d[key][i] - min) / ((max - min) || 1)) * h;
+    return px.toFixed(1) + "," + py.toFixed(1);
+  }).join(" ");
+  return `<polyline points="${pts}" fill="none" stroke="${telColor(d)}" stroke-width="2"${dash ? ' stroke-dasharray="6 4"' : ""} vector-effect="non-scaling-stroke"/>`;
+}
+
+function telChart(title, key, min, max, unit) {
+  const a = telData.drivers.find(d => d.code === telA);
+  const b = telB ? telData.drivers.find(d => d.code === telB) : null;
+  const maxX = Math.max(...telData.drivers.map(d => d.dist[d.dist.length - 1]));
+  const W = 1000, H = 150, geo = { x0: 4, y0: 10, w: W - 8, h: H - 28, maxX };
+  const gridY = [min, (min + max) / 2, max].map(v =>
+    `<line x1="${geo.x0}" x2="${geo.x0 + geo.w}" y1="${(geo.y0 + geo.h - ((v - min) / ((max - min) || 1)) * geo.h).toFixed(1)}" y2="${(geo.y0 + geo.h - ((v - min) / ((max - min) || 1)) * geo.h).toFixed(1)}" class="tg"/>`
+    + `<text x="${geo.x0 + 2}" y="${(geo.y0 + geo.h - ((v - min) / ((max - min) || 1)) * geo.h - 2).toFixed(1)}" class="tgl">${Math.round(v)}</text>`).join("");
+  return `<div class="tel-chart"><div class="tel-ct">${title} <i>(${unit})</i></div>`
+    + `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${gridY}`
+    + telTrace(a, key, geo, min, max, false) + (b ? telTrace(b, key, geo, min, max, true) : "")
+    + `</svg></div>`;
+}
+
+function renderTelemetry() {
+  const ds = telData.drivers;
+  const chips = sel => ds.map(d =>
+    `<button class="tel-chip${(sel === "a" ? telA : telB) === d.code ? " on" : ""}" style="border-color:${telColor(d)}" `
+    + `onclick="telPick('${sel}','${d.code}')">${d.code}</button>`).join("");
+  const a = ds.find(d => d.code === telA), b = telB ? ds.find(d => d.code === telB) : null;
+  out.innerHTML =
+    `<div class="section-title">Telemetry analysis · ${telData.session}</div>`
+    + `<p class="note">Fastest-lap traces from FastF1. Pick a driver, and optionally a second to overlay (dashed) for a head-to-head.</p>`
+    + `<div class="tel-row"><span class="tel-lbl">Driver</span><div class="tel-chips">${chips("a")}</div></div>`
+    + `<div class="tel-row"><span class="tel-lbl">Compare</span><div class="tel-chips"><button class="tel-chip${telB ? "" : " on"}" onclick="telPick('b','')">none</button>${chips("b")}</div></div>`
+    + `<div class="tel-legend"><span style="color:${telColor(a)}">— ${a.code} ${telLap(a.lap_time)}</span>`
+    + (b ? ` <span style="color:${telColor(b)}">‑‑ ${b.code} ${telLap(b.lap_time)}</span>` : "") + `</div>`
+    + telChart("Speed", "speed", 0, Math.max(...ds.flatMap(d => d.speed)) + 10, "km/h")
+    + telChart("Throttle", "throttle", 0, 100, "%")
+    + telChart("Brake", "brake", 0, 100, "%")
+    + `<p class="note">Traces run left→right along a lap by track distance. ${telData.session.includes("SAMPLE") ? "<b>This is sample data</b> — the FastF1 pipeline replaces it with the real session." : ""}</p>`;
+}
+
+function telPick(which, code) {
+  if (which === "a") { telA = code; if (telB === code) telB = null; }
+  else telB = code || null;
+  renderTelemetry();
 }
 
 // ---------- settings ----------

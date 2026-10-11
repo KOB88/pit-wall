@@ -1,0 +1,39 @@
+name: Update FastF1 telemetry
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"    # Mondays 08:00 UTC (after a race weekend)
+  workflow_dispatch:        # and on-demand from the Actions tab
+
+permissions:
+  contents: write           # commit telemetry/latest.json back to the repo
+
+jobs:
+  telemetry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache FastF1 data
+        uses: actions/cache@v4
+        with:
+          path: .fastf1cache
+          key: fastf1-${{ github.run_id }}
+          restore-keys: fastf1-
+      - name: Install FastF1
+        run: pip install fastf1
+      - name: Export telemetry
+        run: python scripts/fetch-telemetry.py
+      - name: Commit if changed
+        run: |
+          git config user.name "pit-wall-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f telemetry/latest.json ] && ! git diff --quiet -- telemetry/latest.json; then
+            git add telemetry/latest.json
+            git commit -m "chore: update telemetry/latest.json [skip ci]"
+            git push
+          else
+            echo "No telemetry change."
+          fi
